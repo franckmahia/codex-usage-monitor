@@ -37,16 +37,53 @@ function Card(props: { label: string; value: string; sub?: string; cls?: string 
 }
 
 function DailyChart({ byDay }: { byDay: SummaryDto["by_day"] }) {
+  const W = 720;
+  const H = 190;
+  const labelH = 22;
+  const plotH = H - labelH - 18;
   const max = Math.max(1, ...byDay.map((b) => b.input));
+  const n = Math.max(1, byDay.length);
+  const slot = W / n;
+  const bw = Math.min(64, slot * 0.6);
+
   return (
-    <div className="chart">
-      {byDay.map((b) => (
-        <div className="bar-wrap" key={b.name} title={`${b.name} — ${fmtTokens(b.input)}`}>
-          <div className="bar" style={{ height: `${(b.input / max) * 100}%` }} />
-          <div className="bar-label">{b.name.slice(5)}</div>
-        </div>
+    <svg viewBox={`0 0 ${W} ${H}`} className="chart-svg" role="img" aria-label="Usage quotidien">
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line
+          key={f}
+          x1={0}
+          x2={W}
+          y1={18 + plotH * (1 - f)}
+          y2={18 + plotH * (1 - f)}
+          stroke="#2a3247"
+          strokeDasharray="3 4"
+          strokeWidth={1}
+        />
       ))}
-    </div>
+      {byDay.map((b, i) => {
+        const h = Math.max(2, (b.input / max) * plotH);
+        const x = slot * i + (slot - bw) / 2;
+        const y = 18 + plotH - h;
+        return (
+          <g key={b.name}>
+            <title>{`${b.name} — ${fmtTokens(b.input)} input · ${fmtInt(b.calls)} appels`}</title>
+            <rect x={x} y={y} width={bw} height={h} rx={4} fill="url(#barGrad)" />
+            <text x={x + bw / 2} y={y - 5} textAnchor="middle" fontSize={11} fill="#8b93a7">
+              {fmtTokens(b.input)}
+            </text>
+            <text x={x + bw / 2} y={H - 6} textAnchor="middle" fontSize={11} fill="#8b93a7">
+              {b.name.slice(5)}
+            </text>
+          </g>
+        );
+      })}
+      <defs>
+        <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#5a82eb" />
+          <stop offset="100%" stopColor="#3a5bbf" />
+        </linearGradient>
+      </defs>
+    </svg>
   );
 }
 
