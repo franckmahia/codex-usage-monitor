@@ -6,3 +6,4 @@ Cargo.lock
 src-tauri/target/
 ui/node_modules/
 ui/dist/
+.DS_Store
