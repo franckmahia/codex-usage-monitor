@@ -296,6 +296,23 @@ fn get_pricing() -> Result<Vec<PricingInfoDto>, String> {
         .collect())
 }
 
+/// macOS + WKWebView : tao et WebKit se disputent le curseur au bord de
+/// la fenetre (flicker fleche/resize). On fait accorder les deux : le web
+/// signale les transitions de zone de bord, tao applique le curseur au
+/// niveau AppKit, et le CSS du web affiche la meme forme.
+#[tauri::command]
+fn set_edge_cursor(window: tauri::WebviewWindow, cursor: Option<String>) -> Result<(), String> {
+    use tauri::CursorIcon;
+    let icon = match cursor.as_deref() {
+        Some("ew-resize") => CursorIcon::EwResize,
+        Some("ns-resize") => CursorIcon::NsResize,
+        Some("nwse-resize") => CursorIcon::NwseResize,
+        Some("nesw-resize") => CursorIcon::NeswResize,
+        _ => CursorIcon::Default,
+    };
+    window.set_cursor_icon(icon).map_err(|e| e.to_string())
+}
+
 struct AppState {
     codex_home: PathBuf,
     db: PathBuf,
@@ -312,6 +329,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_summary,
             get_threads,
+            set_edge_cursor,
             get_diagnostics,
             refresh_import,
             export_csv_files,

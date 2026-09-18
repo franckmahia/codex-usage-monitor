@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   getDiagnostics,
@@ -119,31 +120,39 @@ function BucketTable({ rows, labelHeader }: { rows: SummaryDto["by_model"]; labe
 }
 
 /**
- * macOS + WKWebView : le contenu web couvre les pixels de bord et impose
- * son curseur CSS, écrasant l'affordance native de redimensionnement
- * (le drag natif, lui, fonctionne). On rétablit visuellement le curseur
- * de resize à proximité des bords gauche/droit/bas.
+ * macOS + WKWebView : le contenu web couvre les pixels de bord et deux
+ * systemes se disputent le curseur (tao via resetCursorRects, WebKit via
+ * le curseur CSS) -> flicker. On fait accorder les deux : le hook calcule
+ * la zone de bord et (a) applique le meme curseur CSS, (b) signale la
+ * transition a tao qui l'applique au niveau AppKit (set_cursor_icon).
  */
 function useEdgeResizeCursor() {
   useEffect(() => {
     const EDGE = 5;
+    let last = "";
     const onMove = (e: MouseEvent) => {
       const el = e.target as HTMLElement | null;
-      if (el && el.closest("button, input, a, select, textarea")) {
-        document.body.style.cursor = "";
-        return;
-      }
-      const left = e.clientX <= EDGE;
-      const right = e.clientX >= window.innerWidth - EDGE;
-      const bottom = e.clientY >= window.innerHeight - EDGE;
       let cur = "";
-      if ((left && bottom) || (right && bottom)) cur = "nwse-resize";
-      else if (left || right) cur = "ew-resize";
-      else if (bottom) cur = "ns-resize";
+      if (!(el && el.closest("button, input, a, select, textarea"))) {
+        const left = e.clientX <= EDGE;
+        const right = e.clientX >= window.innerWidth - EDGE;
+        const bottom = e.clientY >= window.innerHeight - EDGE;
+        if ((left && bottom) || (right && bottom)) cur = "nwse-resize";
+        else if (left || right) cur = "ew-resize";
+        else if (bottom) cur = "ns-resize";
+      }
       document.body.style.cursor = cur;
+      if (cur !== last) {
+        last = cur;
+        void invoke("set_edge_cursor", { cursor: cur || null }).catch(() => {});
+      }
     };
     const onLeave = () => {
-      document.body.style.cursor = "";
+      if (last) {
+        last = "";
+        document.body.style.cursor = "";
+        void invoke("set_edge_cursor", { cursor: null }).catch(() => {});
+      }
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseout", onLeave);
