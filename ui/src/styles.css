@@ -149,3 +149,28 @@ tr:last-child td { border-bottom: none; }
 .tabbar { display: flex; gap: 6px; margin-bottom: 16px; }
 .tabbar button { background: var(--panel); border: 1px solid var(--border); color: var(--muted); }
 .tabbar button.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+.progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--green), var(--accent));
+  background-size: 200% 100%;
+  animation: slide 1s linear infinite;
+  z-index: 100;
+}
+@keyframes slide {
+  from { background-position: 0% 0; }
+  to { background-position: 200% 0; }
+}
+.status-line {
+  color: var(--green);
+  background: rgba(62, 207, 142, 0.08);
+  border: 1px solid rgba(62, 207, 142, 0.4);
+  border-radius: 8px;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}

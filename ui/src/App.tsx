@@ -174,10 +174,12 @@ export default function App() {
   const [pricing, setPricing] = useState<PricingInfoDto[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
 
   const loadSummary = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setStatus(null);
     try {
       setSummary(await getSummary(from || null, to || null));
     } catch (e) {
@@ -230,18 +232,29 @@ export default function App() {
   };
 
   const onExport = async () => {
-    const dir = await open({ directory: true, multiple: false, title: "Dossier d'export CSV" });
-    if (!dir) return;
+    setError(null);
+    setStatus("Sélection du dossier…");
+    setBusy(true);
     try {
+      const dir = await open({ directory: true, multiple: false, title: "Dossier d'export CSV" });
+      if (!dir) {
+        setStatus(null);
+        return;
+      }
+      setStatus("Export en cours…");
       const files = await exportCsvFiles(dir as string, from || null, to || null);
-      alert(`Export CSV écrit :\n${files.join("\n")}`);
+      setStatus(`Export CSV écrit : ${files.map((f) => f.split("/").pop()).join(", ")}`);
     } catch (e) {
+      setStatus(null);
       setError(String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <div className="app">
+    <div className={`app ${busy ? "busy" : ""}`}>
+      {busy && <div className="progress" aria-hidden="true" />}
       <h1>Codex Usage Monitor</h1>
       <div className="muted">
         Usage observé depuis les logs locaux — « équivalent » = valorisation grille Codex, jamais une facture OpenAI.
@@ -277,6 +290,7 @@ export default function App() {
       </div>
 
       {error && <div className="error-box">{error}</div>}
+      {status && !busy && <div className="status-line">{status}</div>}
 
       {tab === "dashboard" && summary && (
         <>

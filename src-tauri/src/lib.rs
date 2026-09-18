@@ -71,7 +71,7 @@ pub struct SummaryDto {
 }
 
 #[tauri::command]
-fn get_summary(state: tauri::State<AppState>, from: Option<String>, to: Option<String>) -> Result<SummaryDto, String> {
+async fn get_summary(state: tauri::State<'_, AppState>, from: Option<String>, to: Option<String>) -> Result<SummaryDto, String> {
     let engine = pricing::PricingEngine::embedded();
     import::import(&state.codex_home, &state.db, &engine, false, false)?;
     let calls = import::load_calls(&state.db, from.as_deref(), to.as_deref())?;
@@ -126,8 +126,8 @@ pub struct ThreadRow {
 }
 
 #[tauri::command]
-fn get_threads(
-    state: tauri::State<AppState>,
+async fn get_threads(
+    state: tauri::State<'_, AppState>,
     from: Option<String>,
     to: Option<String>,
     limit: Option<u32>,
@@ -191,7 +191,7 @@ pub struct DiagnosticsDto {
 }
 
 #[tauri::command]
-fn get_diagnostics(state: tauri::State<AppState>) -> Result<DiagnosticsDto, String> {
+async fn get_diagnostics(state: tauri::State<'_, AppState>) -> Result<DiagnosticsDto, String> {
     let fresh = codex_meter::scan::scan(&state.codex_home);
     let d = &fresh.diagnostics;
     let conn = store::open_db(&state.db)?;
@@ -243,7 +243,7 @@ pub struct ImportReportDto {
 }
 
 #[tauri::command]
-fn refresh_import(state: tauri::State<AppState>) -> Result<ImportReportDto, String> {
+async fn refresh_import(state: tauri::State<'_, AppState>) -> Result<ImportReportDto, String> {
     let engine = pricing::PricingEngine::embedded();
     let rep = import::import(&state.codex_home, &state.db, &engine, false, false)?;
     Ok(ImportReportDto {
@@ -258,8 +258,8 @@ fn refresh_import(state: tauri::State<AppState>) -> Result<ImportReportDto, Stri
 }
 
 #[tauri::command]
-fn export_csv_files(
-    state: tauri::State<AppState>,
+async fn export_csv_files(
+    state: tauri::State<'_, AppState>,
     dir: String,
     from: Option<String>,
     to: Option<String>,

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions par defaut de la fenetre principale (dialogue natif pour l'export CSV)",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default", "opener:default"]
+}
