@@ -141,6 +141,7 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
         if !(line.contains("\"token_usage_record\"")
             || line.contains("\"turn_context\"")
             || line.contains("\"token_count\"")
+            || line.contains("\"thread_settings_applied\"")
             || line.contains("\"session_meta\""))
         {
             out.end_offset = offset;
@@ -228,6 +229,37 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
                 }
             }
             "event_msg" => {
+                // Service tier : event_msg payload.type == "thread_settings_applied".
+                let payload_type = parsed
+                    .payload
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if payload_type == "thread_settings_applied" {
+                    let thread_id = parsed
+                        .payload
+                        .get("thread_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let tier = parsed
+                        .payload
+                        .get("thread_settings")
+                        .and_then(|t| t.get("service_tier"))
+                        .and_then(|v| v.as_str())
+                        .map(crate::model::ServiceTier::parse)
+                        .unwrap_or(crate::model::ServiceTier::Unknown);
+                    if let Some(thread_id) = thread_id {
+                        result.thread_settings.push((
+                            thread_id,
+                            parsed.timestamp.clone().unwrap_or_default(),
+                            tier.as_str().to_string(),
+                        ));
+                    }
+                    out.end_offset = offset;
+                    out.lines_processed += 1;
+                    continue;
+                }
+
                 // Fallback ancien format : event_msg payload.type == "token_count".
                 let is_token_count = parsed
                     .payload
@@ -306,6 +338,40 @@ pub fn parse_file(path: &Path) -> FileParseResult {
     parse_file_from(path, 0, 0).result
 }
 
+/// Resolve le service tier d'un evenement : dernier settings du thread
+/// anterieur au timestamp de l'appel. Pas de retroactivite : un event
+/// settings POSTERIEUR ne requalifie jamais un appel anterieur.
+/// Pas d'event applicable => Unknown (jamais supposer standard).
+pub fn resolve_tier(
+    event: &RawUsageEvent,
+    thread_settings: &[(String, String, String)],
+) -> crate::model::ServiceTier {
+    use crate::model::ServiceTier;
+    let Some(thread_id) = event.thread_id.as_deref() else {
+        return ServiceTier::Unknown;
+    };
+    let call_ts = event.timestamp_utc.as_deref().unwrap_or("");
+    let mut best: Option<(bool, &str)> = None; // (ts_match, tier)
+    for (tid, ts, tier) in thread_settings.iter().rev() {
+        if tid != thread_id {
+            continue;
+        }
+        let applicable = if call_ts.is_empty() {
+            true
+        } else {
+            ts.as_str() <= call_ts
+        };
+        if applicable {
+            best = Some((true, tier.as_str()));
+            break;
+        }
+    }
+    match best {
+        Some((_, tier)) => ServiceTier::parse(tier),
+        None => ServiceTier::Unknown,
+    }
+}
+
 /// Resolve le modele d'un evenement : exact (turn_id), puis inferred
 /// (root_turn_id unique), sinon unknown. Ne jamais inventer un modele.
 pub fn resolve_model(
@@ -364,10 +430,12 @@ pub fn finalize_call(
     turn_models: &HashMap<String, String>,
     turn_cwd: &HashMap<String, String>,
     root_models: &HashMap<String, String>,
+    thread_settings: &[(String, String, String)],
     source_file: &str,
     archived: bool,
 ) -> crate::model::InferenceCall {
     let (model, confidence) = resolve_model(event, turn_models, root_models);
+    let service_tier = resolve_tier(event, thread_settings);
     let project_path = meta
         .cwd
         .clone()
@@ -382,6 +450,7 @@ pub fn finalize_call(
         root_turn_id: event.root_turn_id.clone(),
         model_slug: model,
         model_confidence: confidence,
+        service_tier,
         project_path,
         activity: None,
         parent_thread_id: None,

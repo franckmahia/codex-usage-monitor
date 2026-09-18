@@ -22,6 +22,7 @@ pub struct ImportReport {
     pub calls_enriched: u64,
     pub repriced: bool,
     pub priced_calls: u64,
+    pub tiers_repaired: u64,
     pub duration_ms: u64,
 }
 
@@ -86,22 +87,46 @@ pub fn import(
         conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
         let mut inserted_in_file = 0u64;
         let mut dup_in_file = 0u64;
+        let mut tiers_repaired = 0u64;
 
         let primary = res.primary_events > 0;
+        // Les settings du fichier alimentent d'abord la base (fallback
+        // inter-fichiers pour les imports incrementaux suivants).
+        for (tid, ts, tier) in &res.thread_settings {
+            store::upsert_thread_settings(&conn, tid, tier, ts)?;
+        }
         for event in &res.raw_calls {
             if primary && event.source_format == crate::model::SourceFormat::LegacyTokenCount {
                 continue;
             }
-            let call = parser::finalize_call(
+            let mut call = parser::finalize_call(
                 event,
                 &res.meta,
                 &res.turn_models,
                 &res.turn_cwd,
                 &res.root_models,
+                &res.thread_settings,
                 &rel,
                 file.archived,
             );
-            let is_new = store::insert_call(&conn, &call)?;
+            if call.service_tier == crate::model::ServiceTier::Unknown {
+                // Fallback DB : settings appliques avant le checkpoint courant.
+                if let Some(tid) = event.thread_id.as_deref() {
+                    if let Some((tier, applied_ts)) = store::get_thread_tier(&conn, tid) {
+                        let applicable = event
+                            .timestamp_utc
+                            .as_deref()
+                            .map_or(true, |ts| ts >= applied_ts.as_str());
+                        if applicable {
+                            call.service_tier = crate::model::ServiceTier::parse(&tier);
+                        }
+                    }
+                }
+            }
+            let (is_new, tier_repaired) = store::insert_call(&conn, &call)?;
+            if tier_repaired {
+                tiers_repaired += 1;
+            }
             if is_new {
                 inserted_in_file += 1;
                 let cd = engine.cost_codex(&call);
@@ -124,6 +149,7 @@ pub fn import(
         )?;
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
 
+        report.tiers_repaired += tiers_repaired;
         report.files_changed += 1;
         report.calls_inserted += inserted_in_file;
         report.duplicates_ignored += dup_in_file;
@@ -143,9 +169,13 @@ pub fn import(
     report.threads_enriched = threads_enriched;
     report.calls_enriched = calls_enriched;
 
-    // Re-pricing si le catalogue a change.
+    // Re-pricing si le catalogue a change ou si des tiers ont ete repares
+    // (le cout fast depend du tier).
     let fp = pricing_fingerprint(engine);
-    if force_reprice || store::get_meta(&conn, "pricing_fingerprint").as_deref() != Some(fp.as_str()) {
+    if force_reprice
+        || report.tiers_repaired > 0
+        || store::get_meta(&conn, "pricing_fingerprint").as_deref() != Some(fp.as_str())
+    {
         report.repriced = true;
         report.priced_calls = store::reprice_all(&conn, engine)?;
         store::set_meta(&conn, "pricing_fingerprint", &fp)?;

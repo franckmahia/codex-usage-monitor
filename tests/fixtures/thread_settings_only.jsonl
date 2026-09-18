@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-15T11:00:00.000Z","type":"session_meta","payload":{"id":"sess-tieronly","timestamp":"2026-09-15T11:00:00.000Z","cwd":"/Users/fmahia/Dev/TierProj","originator":"Codex CLI","cli_version":"0.156.0"}}
+{"timestamp":"2026-09-15T11:00:01.000Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-tier","thread_settings":{"model":"gpt-6-astra","model_provider_id":"openai","service_tier":"fast"}}}

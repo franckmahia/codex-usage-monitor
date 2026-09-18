@@ -46,6 +46,32 @@ impl TokenUsage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    Unknown,
+    Standard,
+    Fast,
+}
+
+impl ServiceTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceTier::Unknown => "unknown",
+            ServiceTier::Standard => "standard",
+            ServiceTier::Fast => "fast",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "fast" => ServiceTier::Fast,
+            "standard" | "default" | "priority" | "flex" => ServiceTier::Standard,
+            _ => ServiceTier::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelConfidence {
     Unknown,
     Inferred,
@@ -97,6 +123,7 @@ pub struct InferenceCall {
     pub root_turn_id: Option<String>,
     pub model_slug: Option<String>,
     pub model_confidence: ModelConfidence,
+    pub service_tier: ServiceTier,
     pub project_path: Option<String>,
     pub activity: Option<String>,
     pub parent_thread_id: Option<String>,
@@ -164,6 +191,8 @@ pub struct FileParseResult {
     pub turn_cwd: std::collections::HashMap<String, String>,
     /// root_turn_id -> modele si unique (pour attribution "inferred")
     pub root_models: std::collections::HashMap<String, String>,
+    /// thread_id -> [(ts_settings, service_tier)] dans l'ordre du fichier
+    pub thread_settings: Vec<(String, String, String)>,
     pub counters: FileCounters,
     pub errors: Vec<String>,
     /// Somme de secours legacy (last_token_usage), uniquement pour le consistency check.

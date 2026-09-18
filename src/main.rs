@@ -314,6 +314,8 @@ fn render_summary(
     }
 
     let (exact, inferred, unknown) = aggregate::confidence_stats(calls);
+    let tier_stats = codex_meter::pricing::tier_stats(calls);
+    let confidence = codex_meter::pricing::pricing_confidence(calls);
     let period_note = match (&cli.from, &cli.to) {
         (Some(f), Some(t)) => format!("{f} → {t}"),
         (Some(f), None) => format!("depuis {f}"),
@@ -355,6 +357,8 @@ fn render_summary(
                     "note": "estimation basee sur la grille Codex/Work ; jamais une facture OpenAI",
                 },
                 "model_confidence": { "exact": exact, "inferred": inferred, "unknown": unknown },
+                "service_tier": { "fast": tier_stats.0, "standard": tier_stats.1, "unknown": tier_stats.2 },
+                "pricing_confidence_percent": confidence,
                 "by_day": to_map(aggregate::by_day(calls, engine)),
                 "by_model": to_map(aggregate::by_model(calls, engine)),
                 "by_activity": to_map(aggregate::by_activity(calls, engine)),
@@ -388,6 +392,13 @@ fn render_summary(
     if inferred + unknown > 0 {
         println!(
             "Confiance modèle   exact {exact} · inferred {inferred} · unknown {unknown}"
+        );
+    }
+    println!("Confiance tarif    {:.1} %", confidence);
+    if tier_stats.0 > 0 {
+        println!(
+            "Fast mode          {} appel(s) — multiplicateur fast appliqué",
+            fmt_int(tier_stats.0)
         );
     }
 
@@ -500,10 +511,14 @@ fn render_summary(
         }
     }
     println!();
-    println!(
-        "Note : service tier non déterminé pour {} appel(s) — valorisés au tarif standard (fast/régional non appliqués).",
-        calls.len()
-    );
+    if tier_stats.2 > 0 {
+        println!(
+            "Note : service tier non déterminé pour {} appel(s) — valorisés au tarif standard (fast/régional non appliqués).",
+            fmt_int(tier_stats.2)
+        );
+    } else if !calls.is_empty() {
+        println!("Note : service tier déterminé pour tous les appels (régional jamais supposé).");
+    }
 }
 
 fn render_doctor(home: &std::path::Path, db_path: &std::path::Path, engine: &PricingEngine, cli: &Cli) {

@@ -71,6 +71,7 @@ fn default_output_mult() -> f64 {
 pub struct CostBreakdown {
     pub model_known: bool,
     pub long_context: bool,
+    pub fast_applied: bool,
     pub equivalent_cost: f64,
     pub cost_without_cache: f64,
     pub cache_savings: f64,
@@ -153,9 +154,20 @@ impl PricingEngine {
         let cache_write = u.cache_write_input_tokens as f64;
         let output = u.output_tokens as f64;
 
-        let input_rate = rule.input_rate * in_mult;
-        let cached_rate = rule.cached_rate * cached_mult;
-        let output_rate = rule.output_rate * out_mult;
+        // Service tier : fast applique explicitement (multiplier du catalogue),
+        // regional reserve a une future source de donnees (jamais suppose).
+        let fast_applied =
+            call.service_tier == crate::model::ServiceTier::Fast && rule.fast_multiplier.is_some();
+        let fast_mult = if fast_applied {
+            rule.fast_multiplier.unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        let regional_mult = rule.regional_multiplier.unwrap_or(1.0);
+
+        let input_rate = rule.input_rate * in_mult * fast_mult * regional_mult;
+        let cached_rate = rule.cached_rate * cached_mult * fast_mult * regional_mult;
+        let output_rate = rule.output_rate * out_mult * fast_mult * regional_mult;
 
         // Ecritures de cache :
         // - profil Codex : non facturees separement, valorisees au tarif cached
@@ -181,6 +193,7 @@ impl PricingEngine {
         CostBreakdown {
             model_known: true,
             long_context: long,
+            fast_applied,
             equivalent_cost,
             cost_without_cache,
             cache_savings: cost_without_cache - equivalent_cost,
@@ -211,6 +224,37 @@ pub fn priced(
     )
 }
 
+/// Confiance tarifaire (cahier des charges §13) : part des appels valorises
+/// avec un modele connu ET un service tier determine (pas de supposition
+/// silencieuse du standard).
+pub fn pricing_confidence(calls: &[crate::model::InferenceCall]) -> f64 {
+    if calls.is_empty() {
+        return 0.0;
+    }
+    let confident = calls
+        .iter()
+        .filter(|c| {
+            c.model_slug.is_some() && c.service_tier != crate::model::ServiceTier::Unknown
+        })
+        .count();
+    confident as f64 / calls.len() as f64 * 100.0
+}
+
+/// (fast, standard, unknown) sur une liste d'appels.
+pub fn tier_stats(calls: &[crate::model::InferenceCall]) -> (u64, u64, u64) {
+    let mut fast = 0;
+    let mut standard = 0;
+    let mut unknown = 0;
+    for c in calls {
+        match c.service_tier {
+            crate::model::ServiceTier::Fast => fast += 1,
+            crate::model::ServiceTier::Standard => standard += 1,
+            crate::model::ServiceTier::Unknown => unknown += 1,
+        }
+    }
+    (fast, standard, unknown)
+}
+
 /// Somme helper utilisee par les agregats.
 pub fn usage_of(calls: &[crate::model::InferenceCall]) -> TokenUsage {
     let mut t = TokenUsage::default();
@@ -235,6 +279,7 @@ mod tests {
             root_turn_id: None,
             model_slug: Some(model.into()),
             model_confidence: ModelConfidence::Exact,
+            service_tier: crate::model::ServiceTier::Unknown,
             project_path: None,
             activity: None,
             parent_thread_id: None,

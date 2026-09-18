@@ -55,6 +55,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
             root_turn_id TEXT,
             model_slug TEXT,
             model_confidence TEXT NOT NULL,
+            service_tier TEXT NOT NULL DEFAULT 'unknown',
             project_path TEXT,
             activity TEXT,
             parent_thread_id TEXT,
@@ -75,6 +76,12 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_calls_model ON inference_calls(model_slug);
         CREATE INDEX IF NOT EXISTS idx_calls_thread ON inference_calls(thread_id);
         CREATE INDEX IF NOT EXISTS idx_calls_activity ON inference_calls(activity);
+
+        CREATE TABLE IF NOT EXISTS thread_settings (
+            thread_id TEXT PRIMARY KEY,
+            service_tier TEXT NOT NULL,
+            applied_ts TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS threads (
             thread_id TEXT PRIMARY KEY,
@@ -137,6 +144,21 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("schema: {e}"))?;
+    // Migration légère : colonne service_tier sur les bases Phase 2.
+    let has_tier: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('inference_calls')
+             WHERE name = 'service_tier'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(true);
+    if !has_tier {
+        conn.execute("ALTER TABLE inference_calls ADD COLUMN service_tier TEXT NOT NULL DEFAULT 'unknown'", [])
+            .map_err(|e| format!("migration service_tier: {e}"))?;
+    }
+
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -205,20 +227,20 @@ pub fn save_checkpoint(
 }
 
 /// Insere un appel (dedup par event_uid PK et response_id UNIQUE).
-/// Retourne true si l'appel est nouveau.
-pub fn insert_call(conn: &Connection, call: &InferenceCall) -> Result<bool, String> {
+/// Retourne (nouveau, tier_repare).
+pub fn insert_call(conn: &Connection, call: &InferenceCall) -> Result<(bool, bool), String> {
     let created_at = crate::util::iso_utc(crate::util::now_unix());
     conn.execute(
         "INSERT OR IGNORE INTO inference_calls(
             event_uid, response_id, timestamp_utc, day,
             session_id, thread_id, turn_id, root_turn_id,
-            model_slug, model_confidence, project_path,
+            model_slug, model_confidence, service_tier, project_path,
             activity, parent_thread_id, thread_title,
             input_tokens, cached_input_tokens, cache_write_input_tokens,
             output_tokens, reasoning_output_tokens, total_tokens,
             source_format, source_file, source_ordinal, archived, created_at
         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         params![
             call.event_uid,
             call.response_id,
@@ -230,6 +252,7 @@ pub fn insert_call(conn: &Connection, call: &InferenceCall) -> Result<bool, Stri
             call.root_turn_id,
             call.model_slug,
             call.model_confidence.as_str(),
+            call.service_tier.as_str(),
             call.project_path,
             call.activity,
             call.parent_thread_id,
@@ -248,7 +271,60 @@ pub fn insert_call(conn: &Connection, call: &InferenceCall) -> Result<bool, Stri
         ],
     )
     .map_err(|e| format!("insert call: {e}"))?;
-    Ok(conn.changes() > 0)
+    let is_new = conn.changes() > 0;
+    let mut tier_repaired = false;
+    if !is_new && call.service_tier != crate::model::ServiceTier::Unknown {
+        // Call deja present : completer le tier si la base avait Unknown.
+        conn.execute(
+            "UPDATE inference_calls SET service_tier = ?2
+             WHERE event_uid = ?1
+               AND service_tier IN ('unknown', '')",
+            params![call.event_uid, call.service_tier.as_str()],
+        )
+        .map_err(|e| format!("update tier: {e}"))?;
+        tier_repaired = conn.changes() > 0;
+    }
+    Ok((is_new, tier_repaired))
+}
+
+/// Upsert du dernier service tier connu d'un thread. Remplace seulement
+/// si l'event est plus recent ou egal (les fichiers sont chronologiques).
+pub fn upsert_thread_settings(
+    conn: &Connection,
+    thread_id: &str,
+    tier: &str,
+    applied_ts: &str,
+) -> Result<(), String> {
+    let prev_ts: Option<String> = conn
+        .query_row(
+            "SELECT applied_ts FROM thread_settings WHERE thread_id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .ok();
+    let replace = match &prev_ts {
+        Some(prev) => applied_ts >= prev.as_str(),
+        None => true,
+    };
+    if replace {
+        conn.execute(
+            "INSERT OR REPLACE INTO thread_settings(thread_id, service_tier, applied_ts)
+             VALUES(?1, ?2, ?3)",
+            params![thread_id, tier, applied_ts],
+        )
+        .map_err(|e| format!("upsert settings: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Dernier tier connu en base pour un thread (fallback inter-fichiers).
+pub fn get_thread_tier(conn: &Connection, thread_id: &str) -> Option<(String, String)> {
+    conn.query_row(
+        "SELECT service_tier, applied_ts FROM thread_settings WHERE thread_id = ?1",
+        params![thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
 }
 
 pub fn insert_pricing_result(
@@ -352,6 +428,7 @@ pub fn reprice_all(conn: &Connection, engine: &PricingEngine) -> Result<u64, Str
             root_turn_id: None,
             model_slug,
             model_confidence: parse_confidence(&conf),
+            service_tier: crate::model::ServiceTier::Unknown,
             project_path: None,
             activity: None,
             parent_thread_id: None,
@@ -400,7 +477,7 @@ pub fn load_calls(
     let mut sql = String::from(
         "SELECT event_uid, response_id, timestamp_utc, day,
                 session_id, thread_id, turn_id, root_turn_id,
-                model_slug, model_confidence, project_path,
+                model_slug, model_confidence, service_tier, project_path,
                 activity, parent_thread_id, thread_title,
                 input_tokens, cached_input_tokens, cache_write_input_tokens,
                 output_tokens, reasoning_output_tokens, total_tokens,
@@ -426,22 +503,23 @@ pub fn load_calls(
             root_turn_id: row.get(7)?,
             model_slug: row.get(8)?,
             model_confidence: parse_confidence(&row.get::<_, String>(9)?),
-            project_path: row.get(10)?,
-            activity: row.get(11)?,
-            parent_thread_id: row.get(12)?,
-            thread_title: row.get(13)?,
+            service_tier: crate::model::ServiceTier::parse(&row.get::<_, String>(10)?),
+            project_path: row.get(11)?,
+            activity: row.get(12)?,
+            parent_thread_id: row.get(13)?,
+            thread_title: row.get(14)?,
             usage: TokenUsage {
-                input_tokens: row.get::<_, i64>(14)? as u64,
-                cached_input_tokens: row.get::<_, i64>(15)? as u64,
-                cache_write_input_tokens: row.get::<_, i64>(16)? as u64,
-                output_tokens: row.get::<_, i64>(17)? as u64,
-                reasoning_output_tokens: row.get::<_, i64>(18)? as u64,
-                total_tokens: row.get::<_, i64>(19)? as u64,
+                input_tokens: row.get::<_, i64>(15)? as u64,
+                cached_input_tokens: row.get::<_, i64>(16)? as u64,
+                cache_write_input_tokens: row.get::<_, i64>(17)? as u64,
+                output_tokens: row.get::<_, i64>(18)? as u64,
+                reasoning_output_tokens: row.get::<_, i64>(19)? as u64,
+                total_tokens: row.get::<_, i64>(20)? as u64,
             },
-            source_format: SourceFormat::parse(&row.get::<_, String>(20)?),
-            source_file: row.get(21)?,
-            source_ordinal: row.get::<_, i64>(22)? as u64,
-            archived: row.get::<_, i64>(23)? != 0,
+            source_format: SourceFormat::parse(&row.get::<_, String>(21)?),
+            source_file: row.get(22)?,
+            source_ordinal: row.get::<_, i64>(23)? as u64,
+            archived: row.get::<_, i64>(24)? != 0,
         })
     };
     let rows = match (from, to) {

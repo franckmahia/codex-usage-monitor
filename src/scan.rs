@@ -77,6 +77,7 @@ pub fn scan(codex_home: &std::path::Path) -> ScanOutcome {
             turn_models,
             turn_cwd,
             root_models,
+            thread_settings,
             counters,
             errors,
             legacy_totals: file_legacy,
@@ -133,6 +134,7 @@ pub fn scan(codex_home: &std::path::Path) -> ScanOutcome {
                 &turn_models,
                 &turn_cwd,
                 &root_models,
+                &thread_settings,
                 &path_str,
                 file.archived,
             );
