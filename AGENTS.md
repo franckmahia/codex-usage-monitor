@@ -61,10 +61,28 @@ cargo run -q -- summary --from 2026-09-11 --to 2026-09-18
 cargo run -q -- doctor
 ```
 
+Phase 2 (SQLite) :
+
+```bash
+cargo run -q -- import                    # import incremental (checkpoints, dedup, enrichissement state_5)
+cargo run -q -- import --full             # re-scan complet (dedup garantit l'idempotence)
+cargo run -q -- import --reprice          # recalcule tous les couts
+cargo run -q -- watch                     # surveillance temps reel (notify), import a chaque changement
+cargo run -q -- export --csv <dossier>    # export CSV normalise (by-day/model/project/activity/thread + calls)
+cargo run -q -- scan                      # scan en memoire SANS base (verification / gate)
+```
+
+- Base par defaut : `<data_dir>/codex-meter/meter.sqlite` (jamais dans `~/.codex`).
+- `state_5.sqlite` ouvert en READ ONLY strict (fallback `immutable=1`) ; `threads.tokens_used` affiché comme indication lifetime uniquement, jamais source de totaux.
+- Checkpoints par fichier : `(size, mtime)` pour skip, `last_complete_offset` + `lines_total` pour la reprise ; une dernière ligne incomplète (JSON non terminé) n'avance jamais le checkpoint.
+- `event_uid` (fallback sans response_id) = SHA256(session|thread|turn|timestamp|input|cached|output|ordinal) — sans le chemin : un fichier déplacé vers `archived_sessions/` ne double-compte pas.
+- Re-pricing automatique si la version du catalogue change ; les coûts restent séparés des tokens bruts (`pricing_results`).
+- Attribution modèle des appels legacy : `model` du thread (confiance `inferred`), jamais inventé.
+
 ## Phases
 
-1. Core CLI (scan / summary / doctor) — gate de non-régression sur données réelles.
-2. SQLite + import incrémental + watcher.
+1. ✅ Core CLI (scan / summary / doctor) — gate de non-régression sur données réelles.
+2. ✅ SQLite + import incrémental + watcher + enrichissement state_5 (sous-agents, titres) + export CSV.
 3. Pricing engine complet (Codex / API, historique, long context, fast, régional).
 4. UI Tauri (dashboard, diagnostics, export CSV/JSON).
 5. Temps réel.

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::{ModelConfidence, SourceFormat, TokenUsage};
 
@@ -21,7 +21,7 @@ fn default_unit() -> String {
     "per_1m_tokens".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PricingRule {
     pub model: String,
     #[serde(default)]
@@ -236,6 +236,9 @@ mod tests {
             model_slug: Some(model.into()),
             model_confidence: ModelConfidence::Exact,
             project_path: None,
+            activity: None,
+            parent_thread_id: None,
+            thread_title: None,
             usage: TokenUsage {
                 input_tokens: input,
                 cached_input_tokens: 0,

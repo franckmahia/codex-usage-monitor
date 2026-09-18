@@ -59,6 +59,32 @@ pub enum SourceFormat {
     LegacyTokenCount,
 }
 
+impl SourceFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceFormat::TokenUsageRecord => "token_usage_record",
+            SourceFormat::LegacyTokenCount => "legacy_token_count",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "legacy_token_count" => SourceFormat::LegacyTokenCount,
+            _ => SourceFormat::TokenUsageRecord,
+        }
+    }
+}
+
+impl ModelConfidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelConfidence::Exact => "exact",
+            ModelConfidence::Inferred => "inferred",
+            ModelConfidence::Unknown => "unknown",
+        }
+    }
+}
+
 /// Un appel modele deduplique et normalise.
 #[derive(Debug, Clone)]
 pub struct InferenceCall {
@@ -72,6 +98,9 @@ pub struct InferenceCall {
     pub model_slug: Option<String>,
     pub model_confidence: ModelConfidence,
     pub project_path: Option<String>,
+    pub activity: Option<String>,
+    pub parent_thread_id: Option<String>,
+    pub thread_title: Option<String>,
     pub usage: TokenUsage,
     pub source_format: SourceFormat,
     pub source_file: String,

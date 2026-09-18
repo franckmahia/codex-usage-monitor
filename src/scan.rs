@@ -117,7 +117,7 @@ pub fn scan(codex_home: &std::path::Path) -> ScanOutcome {
 
             let key = match &event.response_id {
                 Some(rid) => format!("rid:{rid}"),
-                None => format!("uid:{}", parser::event_uid(event, &path_str)),
+                None => format!("uid:{}", parser::event_uid(event)),
             };
             if !seen_keys.insert(key) {
                 diagnostics.duplicates_ignored += 1;
@@ -127,39 +127,25 @@ pub fn scan(codex_home: &std::path::Path) -> ScanOutcome {
                 diagnostics.unique_response_ids += 1;
             }
 
-            let (model, confidence) = parser::resolve_model(event, &turn_models, &root_models);
-            if model.is_none() {
+            let call = parser::finalize_call(
+                event,
+                &meta,
+                &turn_models,
+                &turn_cwd,
+                &root_models,
+                &path_str,
+                file.archived,
+            );
+            if call.model_slug.is_none() {
                 diagnostics.calls_unknown_model += 1;
                 diagnostics.unknown_model_tokens += event.usage.total_tokens;
-            } else if confidence == ModelConfidence::Inferred {
+            } else if call.model_confidence == ModelConfidence::Inferred {
                 diagnostics.calls_inferred_model += 1;
             }
 
-            let project_path = meta
-                .cwd
-                .clone()
-                .or_else(|| event.turn_id.as_ref().and_then(|t| turn_cwd.get(t).cloned()));
-
             totals.add(&event.usage);
             legacy_totals.add(&event.usage);
-
-            calls.push(InferenceCall {
-                event_uid: parser::event_uid(event, &path_str),
-                response_id: event.response_id.clone(),
-                timestamp_utc: event.timestamp_utc.clone(),
-                session_id: event.session_id.clone().or_else(|| meta.session_id.clone()),
-                thread_id: event.thread_id.clone(),
-                turn_id: event.turn_id.clone(),
-                root_turn_id: event.root_turn_id.clone(),
-                model_slug: model,
-                model_confidence: confidence,
-                project_path,
-                usage: event.usage,
-                source_format: event.source_format,
-                source_file: path_str.clone(),
-                source_ordinal: event.source_ordinal,
-                archived: file.archived,
-            });
+            calls.push(call);
         }
     }
 

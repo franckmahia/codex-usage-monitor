@@ -110,19 +110,22 @@ pub fn project_name(path: &str) -> String {
     path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path).to_string()
 }
 
-/// Séparation par type d'activité sans double comptage : Auto Review
-/// (modèle codex-auto-review) vs threads ordinaires. Les sous-agents
-/// seront distingués via state DB en Phase 2 ; ici ils restent dans
-/// "ordinary" afin de ne jamais inventer une attribution.
+/// Séparation par type d'activité sans double comptage : priorité à
+/// l'enrichissement state db (main / subagent / auto_review / voice / other),
+/// sinon heuristique sur le modèle (codex-auto-review). Les appels hors
+/// threads connus restent "unknown" afin de ne jamais inventer.
 pub fn by_activity(calls: &[InferenceCall], engine: &PricingEngine) -> Buckets {
     let mut out = Buckets::new();
     for c in calls {
-        let key = match c.model_slug.as_deref() {
-            Some("codex-auto-review") => "auto_review",
-            Some(_) => "ordinary",
-            None => "unknown_model",
+        let key = match c.activity.as_deref() {
+            Some(a) => a.to_string(),
+            None => match c.model_slug.as_deref() {
+                Some("codex-auto-review") => "auto_review".to_string(),
+                Some(_) => "ordinary".to_string(),
+                None => "unknown_model".to_string(),
+            },
         };
-        let mut b = out.entry(key.to_string()).or_default();
+        let mut b = out.entry(key).or_default();
         priced_bucket(&mut b, c, engine);
     }
     out

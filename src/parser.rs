@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
@@ -68,34 +68,73 @@ struct LegacyInfo {
     total_token_usage: Option<TokenUsage>,
 }
 
-/// Parse un fichier rollout JSONL en streaming ligne a ligne.
-/// Ne charge jamais le fichier entier en memoire. Un record invalide
-/// produit une erreur locale et le parsing continue.
-pub fn parse_file(path: &Path) -> FileParseResult {
-    let mut out = FileParseResult::default();
+/// Parse un fichier rollout JSONL en streaming ligne a ligne, a partir
+/// d'un offset (import incremental). Retourne aussi le checkpoint :
+/// l'offset apres la derniere ligne COMPLETE traitee, et le nombre de
+/// lignes traitees (cumul de lines_before). Une derniere ligne sans \n
+/// et JSON invalide (ecriture partielle) est ignoree et le checkpoint
+/// n'avance pas : elle sera relue a la prochaine passe.
+pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> ParsedFile {
+    let mut out = ParsedFile {
+        result: FileParseResult::default(),
+        end_offset: start_offset,
+        lines_processed: 0,
+    };
+    let mut result = FileParseResult::default();
     let mut meta_seen = false;
 
-    let file = match std::fs::File::open(path) {
+    let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            out.open_failed = true;
-            out.errors
+            result.open_failed = true;
+            result
+                .errors
                 .push(format!("open failed: {} ({e})", path.display()));
+            out.result = result;
             return out;
         }
     };
-    let reader = BufReader::with_capacity(256 * 1024, file);
+    if start_offset > 0 {
+        if let Err(e) = file.seek(SeekFrom::Start(start_offset)) {
+            result.open_failed = true;
+            result.errors.push(format!("seek failed: {e}"));
+            out.result = result;
+            return out;
+        }
+    }
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
 
-    for (ordinal, line) in reader.lines().enumerate() {
-        out.counters.lines_total += 1;
-        let line = match line {
-            Ok(l) => l,
+    let mut index: u64 = 0;
+    let mut offset = start_offset;
+    loop {
+        let mut buf = Vec::with_capacity(4096);
+        let n = match reader.read_until(b'\n', &mut buf) {
+            Ok(n) => n,
             Err(e) => {
-                out.errors.push(format!("read failed: {e}"));
+                result.errors.push(format!("read failed: {e}"));
                 break;
             }
         };
-        let ordinal = ordinal as u64;
+        if n == 0 {
+            break;
+        }
+        let complete = buf.last() == Some(&b'\n');
+        let line_str = String::from_utf8_lossy(&buf);
+        let line = line_str.trim_end_matches(['\n', '\r']);
+
+        // Ligne finale incomplete (JSON non termine) : on ne la traite pas
+        // et on n'avance pas le checkpoint.
+        if !complete {
+            let is_valid_json = serde_json::from_str::<serde_json::Value>(line).is_ok();
+            if !is_valid_json {
+                break;
+            }
+        }
+
+        result.counters.lines_total += 1;
+        let ordinal = lines_before + index;
+        index += 1;
+        offset += n as u64;
 
         // Fast path : ignorer sans parser JSON les lignes qui ne contiennent
         // aucun des marqueurs qui nous interessent (messages, tool outputs...).
@@ -104,15 +143,20 @@ pub fn parse_file(path: &Path) -> FileParseResult {
             || line.contains("\"token_count\"")
             || line.contains("\"session_meta\""))
         {
+            out.end_offset = offset;
+            out.lines_processed += 1;
             continue;
         }
 
-        let parsed: RolloutLine = match serde_json::from_str(&line) {
+        let parsed: RolloutLine = match serde_json::from_str(line) {
             Ok(p) => p,
             Err(e) => {
-                out.counters.lines_json_errors += 1;
-                out.errors
+                result.counters.lines_json_errors += 1;
+                result
+                    .errors
                     .push(format!("line {ordinal}: JSON error: {e}"));
+                out.end_offset = offset;
+                out.lines_processed += 1;
                 continue;
             }
         };
@@ -122,7 +166,7 @@ pub fn parse_file(path: &Path) -> FileParseResult {
                 if !meta_seen {
                     meta_seen = true;
                     if let Ok(m) = serde_json::from_value::<SessionMetaPayload>(parsed.payload) {
-                        out.meta = SessionMeta {
+                        result.meta = SessionMeta {
                             session_id: m.id,
                             cwd: m.cwd,
                             originator: m.originator,
@@ -134,21 +178,21 @@ pub fn parse_file(path: &Path) -> FileParseResult {
             "turn_context" => {
                 if let Ok(t) = serde_json::from_value::<TurnContextPayload>(parsed.payload) {
                     if let Some(model) = &t.model {
-                        out.turn_models.insert(t.turn_id.clone(), model.clone());
+                        result.turn_models.insert(t.turn_id.clone(), model.clone());
                         if let Some(root) = &t.root_turn_id {
                             // un seul modele par root pour attribution "inferred"
-                            match out.root_models.get(root) {
+                            match result.root_models.get(root) {
                                 Some(prev) if prev != model => {
-                                    out.root_models.remove(root);
+                                    result.root_models.remove(root);
                                 }
                                 _ => {
-                                    out.root_models.insert(root.clone(), model.clone());
+                                    result.root_models.insert(root.clone(), model.clone());
                                 }
                             }
                         }
                     }
                     if let Some(cwd) = t.cwd {
-                        out.turn_cwd.insert(t.turn_id, cwd);
+                        result.turn_cwd.insert(t.turn_id, cwd);
                     }
                 }
             }
@@ -156,14 +200,14 @@ pub fn parse_file(path: &Path) -> FileParseResult {
                 match serde_json::from_value::<TokenUsageRecordPayload>(parsed.payload) {
                     Ok(p) => {
                         if p.usage.subset_violation() {
-                            out.counters.subset_violations += 1;
+                            result.counters.subset_violations += 1;
                         }
                         if p.response_id.is_none() {
-                            out.counters.records_without_response_id += 1;
+                            result.counters.records_without_response_id += 1;
                         }
-                        out.counters.usage_records += 1;
-                        out.primary_events += 1;
-                        out.raw_calls.push(RawUsageEvent {
+                        result.counters.usage_records += 1;
+                        result.primary_events += 1;
+                        result.raw_calls.push(RawUsageEvent {
                             timestamp_utc: parsed.timestamp,
                             session_id: p.session_id,
                             thread_id: p.thread_id,
@@ -176,8 +220,9 @@ pub fn parse_file(path: &Path) -> FileParseResult {
                         });
                     }
                     Err(e) => {
-                        out.counters.lines_json_errors += 1;
-                        out.errors
+                        result.counters.lines_json_errors += 1;
+                        result
+                            .errors
                             .push(format!("line {ordinal}: malformed token_usage_record: {e}"));
                     }
                 }
@@ -191,28 +236,32 @@ pub fn parse_file(path: &Path) -> FileParseResult {
                     .map(|s| s == "token_count")
                     .unwrap_or(false);
                 if !is_token_count {
+                    out.end_offset = offset;
+                    out.lines_processed += 1;
                     continue;
                 }
-                out.counters.legacy_token_count_events += 1;
+                result.counters.legacy_token_count_events += 1;
                 let info = parsed.payload.get("info");
                 if info.is_none() || info == Some(&Value::Null) {
-                    out.counters.legacy_null_info += 1;
+                    result.counters.legacy_null_info += 1;
+                    out.end_offset = offset;
+                    out.lines_processed += 1;
                     continue;
                 }
                 match serde_json::from_value::<LegacyInfo>(info.unwrap().clone()) {
                     Ok(info) => {
                         if info.total_token_usage.is_some() {
-                            out.counters.legacy_total_usage_present += 1;
+                            result.counters.legacy_total_usage_present += 1;
                         }
                         if let Some(last) = info.last_token_usage {
                             if last.subset_violation() {
-                                out.counters.subset_violations += 1;
+                                result.counters.subset_violations += 1;
                             }
-                            out.legacy_events += 1;
-                            out.legacy_totals.add(&last);
-                            out.raw_calls.push(RawUsageEvent {
+                            result.legacy_events += 1;
+                            result.legacy_totals.add(&last);
+                            result.raw_calls.push(RawUsageEvent {
                                 timestamp_utc: parsed.timestamp,
-                                session_id: out.meta.session_id.clone(),
+                                session_id: result.meta.session_id.clone(),
                                 thread_id: None,
                                 turn_id: None,
                                 root_turn_id: None,
@@ -224,8 +273,9 @@ pub fn parse_file(path: &Path) -> FileParseResult {
                         }
                     }
                     Err(e) => {
-                        out.counters.lines_json_errors += 1;
-                        out.errors
+                        result.counters.lines_json_errors += 1;
+                        result
+                            .errors
                             .push(format!("line {ordinal}: malformed token_count info: {e}"));
                     }
                 }
@@ -235,8 +285,25 @@ pub fn parse_file(path: &Path) -> FileParseResult {
                 // via les compteurs de lignes du diagnostics.
             }
         }
+        out.end_offset = offset;
+        out.lines_processed += 1;
     }
+    out.result = result;
     out
+}
+
+/// Sortie d'un parsing de fichier : resultats + checkpoint incremental.
+#[derive(Debug)]
+pub struct ParsedFile {
+    pub result: FileParseResult,
+    /// Offset apres la derniere ligne complete traitee.
+    pub end_offset: u64,
+    pub lines_processed: u64,
+}
+
+/// Parse complet depuis le debut (scan en memoire).
+pub fn parse_file(path: &Path) -> FileParseResult {
+    parse_file_from(path, 0, 0).result
 }
 
 /// Resolve le modele d'un evenement : exact (turn_id), puis inferred
@@ -261,12 +328,11 @@ pub fn resolve_model(
 }
 
 /// Fallback de cle de deduplication : SHA256(session|thread|turn|timestamp|
-/// input|cached|output|ordinal). Utilise quand response_id est absent.
-pub fn event_uid(event: &RawUsageEvent, source_file: &str) -> String {
+/// input|cached|output|ordinal), spec cahier des charges §5. Sans le chemin :
+/// un fichier deplace vers archived_sessions garde la meme identite d'event.
+pub fn event_uid(event: &RawUsageEvent) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(source_file.as_bytes());
-    hasher.update(b"|");
     hasher.update(event.session_id.as_deref().unwrap_or("").as_bytes());
     hasher.update(b"|");
     hasher.update(event.thread_id.as_deref().unwrap_or("").as_bytes());
@@ -287,5 +353,43 @@ pub fn truncate_err(s: &str) -> String {
         format!("{}…", &s[..MAX_ERR])
     } else {
         s.to_string()
+    }
+}
+
+/// Construit un appel finalise : modele resolu (exact/inferred/unknown),
+/// projet, uid. Partage entre le scan en memoire et l'import SQLite.
+pub fn finalize_call(
+    event: &RawUsageEvent,
+    meta: &SessionMeta,
+    turn_models: &HashMap<String, String>,
+    turn_cwd: &HashMap<String, String>,
+    root_models: &HashMap<String, String>,
+    source_file: &str,
+    archived: bool,
+) -> crate::model::InferenceCall {
+    let (model, confidence) = resolve_model(event, turn_models, root_models);
+    let project_path = meta
+        .cwd
+        .clone()
+        .or_else(|| event.turn_id.as_ref().and_then(|t| turn_cwd.get(t).cloned()));
+    crate::model::InferenceCall {
+        event_uid: event_uid(event),
+        response_id: event.response_id.clone(),
+        timestamp_utc: event.timestamp_utc.clone(),
+        session_id: event.session_id.clone().or_else(|| meta.session_id.clone()),
+        thread_id: event.thread_id.clone(),
+        turn_id: event.turn_id.clone(),
+        root_turn_id: event.root_turn_id.clone(),
+        model_slug: model,
+        model_confidence: confidence,
+        project_path,
+        activity: None,
+        parent_thread_id: None,
+        thread_title: None,
+        usage: event.usage,
+        source_format: event.source_format,
+        source_file: source_file.to_string(),
+        source_ordinal: event.source_ordinal,
+        archived,
     }
 }
