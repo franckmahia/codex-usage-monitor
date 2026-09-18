@@ -1,0 +1,3 @@
+{"timestamp":"2026-09-15T13:00:00.000Z","type":"session_meta","payload":{"id":"sess-unknown","timestamp":"2026-09-15T13:00:00.000Z","cwd":"/Users/fmahia/Dev/Kappa","originator":"Codex CLI","cli_version":"0.157.0"}}
+{"timestamp":"2026-09-15T13:00:02.000Z","type":"token_usage_record","payload":{"session_id":"sess-unknown","thread_id":"thread-unknown","turn_id":"turn-ghost","root_turn_id":"turn-ghost","response_id":"resp-unknown-1","usage":{"input_tokens":7000,"cached_input_tokens":6000,"cache_write_input_tokens":0,"output_tokens":700,"reasoning_output_tokens":350,"total_tokens":7700}}}
+{"timestamp":"2026-09-15T13:01:00.000Z","type":"turn_context","payload":{"turn_id":"turn-ghost","model":"brand-new-model-9x","cwd":"/Users/fmahia/Dev/Kappa","root_turn_id":"turn-ghost"}}
