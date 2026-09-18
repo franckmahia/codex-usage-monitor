@@ -118,8 +118,45 @@ function BucketTable({ rows, labelHeader }: { rows: SummaryDto["by_model"]; labe
   );
 }
 
+/**
+ * macOS + WKWebView : le contenu web couvre les pixels de bord et impose
+ * son curseur CSS, écrasant l'affordance native de redimensionnement
+ * (le drag natif, lui, fonctionne). On rétablit visuellement le curseur
+ * de resize à proximité des bords gauche/droit/bas.
+ */
+function useEdgeResizeCursor() {
+  useEffect(() => {
+    const EDGE = 5;
+    const onMove = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && el.closest("button, input, a, select, textarea")) {
+        document.body.style.cursor = "";
+        return;
+      }
+      const left = e.clientX <= EDGE;
+      const right = e.clientX >= window.innerWidth - EDGE;
+      const bottom = e.clientY >= window.innerHeight - EDGE;
+      let cur = "";
+      if ((left && bottom) || (right && bottom)) cur = "nwse-resize";
+      else if (left || right) cur = "ew-resize";
+      else if (bottom) cur = "ns-resize";
+      document.body.style.cursor = cur;
+    };
+    const onLeave = () => {
+      document.body.style.cursor = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseout", onLeave);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseout", onLeave);
+    };
+  }, []);
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
+  useEdgeResizeCursor();
   const [from, setFrom] = useState(DEFAULT_FROM);
   const [to, setTo] = useState(DEFAULT_TO);
   const [summary, setSummary] = useState<SummaryDto | null>(null);
