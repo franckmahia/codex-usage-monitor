@@ -79,11 +79,22 @@ cargo run -q -- scan                      # scan en memoire SANS base (verificat
 - Re-pricing automatique si la version du catalogue change ; les coûts restent séparés des tokens bruts (`pricing_results`).
 - Attribution modèle des appels legacy : `model` du thread (confiance `inferred`), jamais inventé.
 
+## UI Tauri (Phase 4)
+
+```bash
+./ui/node_modules/.bin/tauri dev     # dev (vite + app)
+./ui/node_modules/.bin/tauri build   # bundle macOS (.app + .dmg)
+```
+
+- Backend : `src-tauri/` (commands get_summary/get_threads/get_diagnostics/refresh_import/export_csv_files/get_pricing), réutilise la lib `codex-meter` — aucune logique de comptage dupliquée.
+- Frontend : `ui/` (React 19 + TypeScript strict + Vite). `npm --prefix ui install` avant le premier build.
+- L'app ne fait que lire la base et relancer l'import incrémental ; aucun réseau.
+
 ## Phases
 
 1. ✅ Core CLI (scan / summary / doctor) — gate de non-régression sur données réelles.
 2. ✅ SQLite + import incrémental + watcher + enrichissement state_5 (sous-agents, titres) + export CSV.
-3. Pricing engine complet (Codex / API, historique, long context, fast, régional).
+3. ✅ Pricing engine complet (Codex / API, historique, long context, fast, régional).
 4. UI Tauri (dashboard, diagnostics, export CSV/JSON).
 5. Temps réel.
 6. Connecteur API OpenAI (usage/costs administratifs, clé en Keychain, jamais en SQLite).

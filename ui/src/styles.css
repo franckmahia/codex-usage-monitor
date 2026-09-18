@@ -1,0 +1,159 @@
+:root {
+  --bg: #0e1117;
+  --panel: #161b26;
+  --panel2: #1c2333;
+  --border: #2a3247;
+  --text: #e6e9f0;
+  --muted: #8b93a7;
+  --accent: #5a82eb;
+  --green: #3ecf8e;
+  --orange: #f5a623;
+  --red: #ef5b58;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.app { padding: 20px 24px 40px; }
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 12px; color: var(--text); }
+
+.toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin: 14px 0 20px;
+  flex-wrap: wrap;
+}
+
+.toolbar input[type="date"] {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+
+button {
+  background: var(--accent);
+  border: none;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+button.secondary { background: var(--panel2); border: 1px solid var(--border); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.card .label { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.card .value { font-size: 24px; font-weight: 700; margin-top: 6px; }
+.card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.card.accent .value { color: var(--accent); }
+.card.green .value { color: var(--green); }
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+td { padding: 7px 8px; border-bottom: 1px solid rgba(42, 50, 71, 0.5); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.thread-title {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.thread-id { color: var(--muted); font-size: 11px; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+}
+.badge.fast { color: var(--orange); }
+.badge.auto_review { color: var(--accent); }
+.badge.subagent { color: var(--green); }
+
+.anomaly {
+  padding: 8px 12px;
+  border-left: 3px solid var(--orange);
+  background: rgba(245, 166, 35, 0.08);
+  border-radius: 0 8px 8px 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.chart { display: flex; align-items: flex-end; gap: 6px; height: 160px; padding-top: 8px; }
+.bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.bar {
+  width: 100%;
+  background: linear-gradient(180deg, var(--accent), #3a5bbf);
+  border-radius: 4px 4px 0 0;
+  min-height: 2px;
+}
+.bar-label { color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+.status-ok { color: var(--green); font-weight: 600; }
+.status-ko { color: var(--red); font-weight: 600; }
+.muted { color: var(--muted); }
+.error-box {
+  background: rgba(239, 91, 88, 0.12);
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0;
+}
+.tabbar { display: flex; gap: 6px; margin-bottom: 16px; }
+.tabbar button { background: var(--panel); border: 1px solid var(--border); color: var(--muted); }
+.tabbar button.active { background: var(--accent); color: white; border-color: var(--accent); }

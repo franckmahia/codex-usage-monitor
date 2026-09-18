@@ -3,3 +3,6 @@ Cargo.lock
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+src-tauri/target/
+ui/node_modules/
+ui/dist/
