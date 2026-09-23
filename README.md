@@ -158,8 +158,8 @@ Catalogues **versionnés** dans `pricing/` :
 
 | Catalogue | Contenu |
 |---|---|
-| `openai-codex-2026-09-18.json` | Grille Codex/Work (Astra 10/1/50, Sol 4/0,40/20, Terra 2/0,20/12, Luna 0,20/0,02/1,20, GPT-5.4 2,50/0,25/15) |
-| `openai-api-2026-09-18.json` | Profil API avec `cache_write_rate` = 1,25 × input |
+| `openai-codex-2026-09-23.json` | Grille Codex/Work : Astra 10/1/50, Sol 4/0,40/20, Terra 2/0,20/12, Luna 0,20/0,02/1,20, GPT-5.5 5/0,50/30, GPT-5.4 2,50/0,25/15, GPT-5.4-Mini, GPT-5.3-Codex, GPT-5.2, Rosalind, Daybreak |
+| `openai-api-2026-09-23.json` | Profil API (grille officielle) : `cache_write_rate` = 1,25 × input quand supporté, sinon N/A |
 
 Chaque règle porte `effective_from` / `effective_until`, `source_url`, `last_verified`. Alias : `codex-auto-review → gpt-5.4`. Un changement de version de catalogue déclenche un re-pricing automatique ; les coûts restent séparés des tokens bruts (`pricing_results`).
 

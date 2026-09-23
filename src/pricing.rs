@@ -97,10 +97,10 @@ impl PricingEngine {
     pub fn embedded() -> Self {
         PricingEngine {
             codex: serde_json::from_str(include_str!(
-                "../pricing/openai-codex-2026-09-18.json"
+                "../pricing/openai-codex-2026-09-23.json"
             ))
             .expect("embedded codex pricing catalog is valid JSON"),
-            api: serde_json::from_str(include_str!("../pricing/openai-api-2026-09-18.json"))
+            api: serde_json::from_str(include_str!("../pricing/openai-api-2026-09-23.json"))
                 .expect("embedded api pricing catalog is valid JSON"),
         }
     }
@@ -118,7 +118,7 @@ impl PricingEngine {
                     .map_err(|e| format!("invalid pricing catalog: {e}"))?
             }
             None => {
-                let raw = include_str!("../pricing/openai-api-2026-09-18.json");
+                let raw = include_str!("../pricing/openai-api-2026-09-23.json");
                 serde_json::from_str(raw).expect("embedded api pricing catalog is valid JSON")
             }
         };
@@ -328,5 +328,57 @@ mod tests {
         let c = engine.cost_codex(&call("totally-new-model", 1000));
         assert!(!c.model_known);
         assert_eq!(c.equivalent_cost, 0.0);
+    }
+
+    #[test]
+    fn latest_codex_models_are_priced() {
+        let engine = PricingEngine::embedded();
+        for model in [
+            "gpt-5.5",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex",
+            "gpt-5.2",
+            "gpt-rosalind-research",
+            "gpt-5.6-cyber",
+            "gpt-5.5-cyber",
+            "gpt-6-astra-law",
+        ] {
+            assert!(
+                engine.cost_codex(&call(model, 1000)).model_known,
+                "{model} doit etre valorise"
+            );
+        }
+        // Modele de recherche sans tarif definitif : jamais valorise.
+        assert!(!engine
+            .cost_codex(&call("gpt-5.3-codex-spark", 1000))
+            .model_known);
+    }
+
+    #[test]
+    fn gpt54_fast_multiplier_is_two() {
+        let engine = PricingEngine::embedded();
+        let mut c = call("gpt-5.4", 1000);
+        c.service_tier = crate::model::ServiceTier::Fast;
+        let cd = engine.cost_codex(&c);
+        assert!(cd.fast_applied);
+        // standard (1000*2.5 + 1000*15)/1e6 = 0.0175 ; fast x2 => 0.035
+        assert!((cd.equivalent_cost - 0.035).abs() < 1e-9);
+    }
+
+    #[test]
+    fn daybreak_aliases_and_latest_api_models_resolve() {
+        let engine = PricingEngine::embedded();
+        assert!(engine
+            .cost_codex(&call("gpt-daybreak-blue-latest", 1000))
+            .model_known);
+        assert!(engine
+            .cost_codex(&call("gpt-daybreak-red-latest", 1000))
+            .model_known);
+        for model in ["gpt-6-sol", "gpt-6-luna", "gpt-5.5-pro", "gpt-5.4-nano"] {
+            assert!(
+                engine.cost_api(&call(model, 1000)).model_known,
+                "{model} doit etre valorise (profil API)"
+            );
+        }
     }
 }

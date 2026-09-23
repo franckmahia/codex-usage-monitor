@@ -153,7 +153,7 @@ fn reprice_updates_costs_when_catalog_changes() {
     // Catalogue alternatif : input x2 pour sol.
     let alt_path = h.home.join("alt-codex.json");
     let mut alt: serde_json::Value =
-        serde_json::from_str(include_str!("../pricing/openai-codex-2026-09-18.json")).unwrap();
+        serde_json::from_str(include_str!("../pricing/openai-codex-2026-09-23.json")).unwrap();
     for rule in alt["rules"].as_array_mut().unwrap().iter_mut() {
         if rule["model"] == "gpt-5.6-sol" {
             rule["input_rate"] = serde_json::json!(8.0);
