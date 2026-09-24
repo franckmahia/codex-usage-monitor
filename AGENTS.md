@@ -29,8 +29,14 @@
   Ne jamais utiliser `total_token_usage` comme source d'agrégation.
 - Jamais mélanger les deux méthodes pour une même session : priorité
   `1. token_usage_record.usage` → `2. legacy last_token_usage` → `3. diagnostic`.
-- Attribution modèle : table `turn_id → model` construite depuis `turn_context`.
-  Confiances : `exact`, `inferred`, `unknown`. Ne jamais inventer un modèle.
+  La règle est **globale à la session** (table `primary_sessions`), pas seulement
+  par fichier : dès qu'une session porte un `token_usage_record`, ses events
+  legacy sont ignorés — même ajoutés plus tard dans un autre segment du fichier.
+- Attribution modèle : table `turn_id → model` construite depuis `turn_context`,
+  persistée par fichier dans `source_files.enrichment_json` pour survivre aux
+  imports incrémentaux (un record dont le `turn_context` précède le checkpoint
+  garde son modèle). Confiances : `exact`, `inferred`, `unknown`. Ne jamais
+  inventer un modèle.
 - Catégories :
   - `ordinary_input = input − cached_input − cache_write_input`
   - `reasoning_output ⊆ output`
@@ -46,12 +52,16 @@
 
 ## Validation obligatoire (gate)
 
-Sur les données réelles du 11 au 18 septembre 2026, `codex-meter summary` doit retrouver :
+Sur les données réelles du 11 au 18 septembre 2026, `codex-meter summary` doit retrouver
+(référence mesurée le 2026-09-24 ; les rollouts de ces journées ont pu grossir depuis
+l'ancienne référence jq 876 415 995 — revérifier la référence, pas seulement l'ordre de grandeur) :
 
-- Input ≈ 0,86 Md (référence jq : 876 415 995)
-- Output ≈ 2,9 M (référence jq : 2 944 355)
+- Input = 898 872 208 (≈ 0,90 Md)
+- Output = 3 005 379 (≈ 3,0 M)
 - Cache hit ≈ 96 %
+- Équivalent ≈ $860
 - et surtout NE PAS afficher ≈ 49,8 B tokens (somme des compteurs cumulatifs = erreur connue).
+- `cargo run -q -- doctor` après import : `Status: CONSISTENT`.
 
 ## Commandes
 
@@ -65,7 +75,8 @@ Phase 2 (SQLite) :
 
 ```bash
 cargo run -q -- import                    # import incremental (checkpoints, dedup, enrichissement state_5)
-cargo run -q -- import --full             # re-scan complet (dedup garantit l'idempotence)
+cargo run -q -- import --full             # RECONSTRUCTION : purge + reimport complet (aligne les event_uid
+                                          # sur le scan, supprime les lignes de fichiers disparus)
 cargo run -q -- import --reprice          # recalcule tous les couts
 cargo run -q -- watch                     # surveillance temps reel (notify), import a chaque changement
 cargo run -q -- export --csv <dossier>    # export CSV normalise (by-day/model/project/activity/thread + calls)
@@ -74,9 +85,10 @@ cargo run -q -- scan                      # scan en memoire SANS base (verificat
 
 - Base par defaut : `<data_dir>/codex-meter/meter.sqlite` (jamais dans `~/.codex`).
 - `state_5.sqlite` ouvert en READ ONLY strict (fallback `immutable=1`) ; `threads.tokens_used` affiché comme indication lifetime uniquement, jamais source de totaux.
-- Checkpoints par fichier : `(size, mtime)` pour skip, `last_complete_offset` + `lines_total` pour la reprise ; une dernière ligne incomplète (JSON non terminé) n'avance jamais le checkpoint.
+- Checkpoints par fichier : `(size, mtime)` pour skip, `last_complete_offset` + `lines_total` pour la reprise ; une dernière ligne incomplète (JSON non terminé) n'avance jamais le checkpoint. `pending_newline` évite de compter deux fois le `\n` final d'une ligne acceptée sans newline ; `had_primary` porte le format moderne au niveau fichier ; `enrichment_json` persiste `session_meta`/`turn_context` entre segments.
 - `event_uid` (fallback sans response_id) = SHA256(session|thread|turn|timestamp|input|cached|output|ordinal) — sans le chemin : un fichier déplacé vers `archived_sessions/` ne double-compte pas.
-- Re-pricing automatique si la version du catalogue change ; les coûts restent séparés des tokens bruts (`pricing_results`).
+- La base métier a un `busy_timeout` de 5 s (UI + watch + CLI concurrents) et les transactions sont `BEGIN IMMEDIATE`.
+- Re-pricing automatique si la version du catalogue change ; les coûts restent séparés des tokens bruts (`pricing_results`), avec `service_tier` conservé (le multiplicateur fast survit au re-pricing).
 - Attribution modèle des appels legacy : `model` du thread (confiance `inferred`), jamais inventé.
 
 ## UI Tauri (Phase 4)

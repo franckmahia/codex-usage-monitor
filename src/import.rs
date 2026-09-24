@@ -23,6 +23,7 @@ pub struct ImportReport {
     pub repriced: bool,
     pub priced_calls: u64,
     pub tiers_repaired: u64,
+    pub legacy_pruned: u64,
     pub duration_ms: u64,
 }
 
@@ -49,6 +50,21 @@ pub fn import(
     let mut report = ImportReport::default();
     let run_started = crate::util::iso_utc(crate::util::now_unix());
 
+    // Rattrapage avant les fichiers : sessions modernes deja en base mais
+    // jamais marquees (checkpoints sautes), + purge de leur legacy.
+    report.legacy_pruned += store::backfill_primary_sessions(&conn)?;
+
+    // --full = reconstruction garantie : on repart d'une base vide pour que
+    // les event_uid (ordinaux) soient exactement ceux du scan, meme si un
+    // ancien drift de checkpoint avait pu s'insinuer.
+    if force_full {
+        conn.execute_batch(
+            "DELETE FROM inference_calls;
+             DELETE FROM pricing_results;",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     let files = discovery::discover(home);
     report.files_seen = files.len();
 
@@ -74,37 +90,110 @@ pub fn import(
         } else {
             store::get_checkpoint(&conn, &rel)
         };
-        let (start_offset, lines_before) = match &cp {
+        let (start_offset, lines_before, resume_pending) = match &cp {
             Some(c) if c.last_complete_offset <= file.size => {
-                (c.last_complete_offset, c.lines_total)
+                (c.last_complete_offset, c.lines_total, c.pending_newline)
             }
-            _ => (0, 0),
+            _ => (0, 0, false),
         };
 
-        let parsed = parser::parse_file_from(&file.path, start_offset, lines_before);
-        let res = parsed.result;
+        let parsed = parser::parse_file_from(&file.path, start_offset, lines_before, resume_pending);
+        let mut res = parsed.result;
 
-        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+        // Continuite des segments : le checkpoint porte l'enrichissement des
+        // lignes deja passees (session_meta, turn_context). Le segment
+        // courant le complete ; sans cela, un record dont le turn_context
+        // precde le checkpoint perdrait son modele et un legacy son session.
+        let prior: crate::model::FileEnrichment = cp
+            .as_ref()
+            .and_then(|c| c.enrichment_json.as_deref())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let mut enr = prior;
+        if res.meta.session_id.is_some() {
+            enr.meta = std::mem::take(&mut res.meta);
+        }
+        for (k, v) in std::mem::take(&mut res.turn_models) {
+            enr.turn_models.insert(k, v);
+        }
+        for (k, v) in std::mem::take(&mut res.turn_cwd) {
+            enr.turn_cwd.insert(k, v);
+        }
+        for (k, v) in std::mem::take(&mut res.root_models) {
+            match enr.root_models.get(&k) {
+                Some(prev) if prev != &v => {
+                    enr.root_models.remove(&k);
+                }
+                _ => {
+                    enr.root_models.insert(k, v);
+                }
+            }
+        }
+        let enrichment_json =
+            serde_json::to_string(&enr).map_err(|e| format!("enrichment {rel}: {e}"))?;
+
+        // BEGIN IMMEDIATE : verrou d'ecriture des le depart, compatible avec
+        // le busy_timeout (un BEGIN differe peut mourir en BUSY a la montee
+        // de verrou sans jamais reessayer).
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
         let mut inserted_in_file = 0u64;
         let mut dup_in_file = 0u64;
         let mut tiers_repaired = 0u64;
 
-        let primary = res.primary_events > 0;
+        // Le format moderne est un fait de FICHIER, pas du segment : un
+        // token_count appendé dans un fichier deja primaire n'est jamais un
+        // supplément de comptabilite (invariant 7).
+        let had_primary_before = cp.as_ref().map(|c| c.had_primary).unwrap_or(false);
+        let primary = had_primary_before || res.primary_events > 0;
+        // Invariant 7 a l'echelle de la base : des qu'une session est couverte
+        // par le format moderne, ses events legacy sont ignores (et les lignes
+        // legacy deja inserees pour cette session sont purgees).
+        if primary {
+            let mut sessions: Vec<&str> = Vec::new();
+            if let Some(s) = enr.meta.session_id.as_deref() {
+                sessions.push(s);
+            }
+            for ev in &res.raw_calls {
+                if ev.source_format == crate::model::SourceFormat::TokenUsageRecord {
+                    if let Some(s) = ev.session_id.as_deref() {
+                        if !sessions.contains(&s) {
+                            sessions.push(s);
+                        }
+                    }
+                }
+            }
+            for s in sessions {
+                store::mark_primary_session(&conn, s)?;
+                report.legacy_pruned += store::clear_legacy_for_session(&conn, s)?;
+            }
+        }
         // Les settings du fichier alimentent d'abord la base (fallback
         // inter-fichiers pour les imports incrementaux suivants).
         for (tid, ts, tier) in &res.thread_settings {
             store::upsert_thread_settings(&conn, tid, tier, ts)?;
         }
         for event in &res.raw_calls {
-            if primary && event.source_format == crate::model::SourceFormat::LegacyTokenCount {
-                continue;
+            if event.source_format == crate::model::SourceFormat::LegacyTokenCount {
+                if primary {
+                    continue;
+                }
+                // Session deja primaire via un AUTRE fichier : ne jamais
+                // recompter l'ancienne methode pour cette session.
+                let covered = event
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|s| store::is_primary_session(&conn, s));
+                if covered {
+                    continue;
+                }
             }
             let mut call = parser::finalize_call(
                 event,
-                &res.meta,
-                &res.turn_models,
-                &res.turn_cwd,
-                &res.root_models,
+                &enr.meta,
+                &enr.turn_models,
+                &enr.turn_cwd,
+                &enr.root_models,
                 &res.thread_settings,
                 &rel,
                 file.archived,
@@ -146,6 +235,9 @@ pub fn import(
             file.mtime_unix,
             parsed.end_offset,
             lines_before + res.counters.lines_total,
+            primary,
+            parsed.pending_newline,
+            &enrichment_json,
         )?;
         conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
 

@@ -66,7 +66,8 @@ codex-meter summary --from 2026-09-12 --to 2026-09-18 --json        # export JSO
 
 # Import incrémental dans SQLite (checkpoints, dédup, enrichissement state_5)
 codex-meter import                # incrémental : ne relit que les fichiers modifiés
-codex-meter import --full         # re-scan complet (la dédup garantit l'idempotence)
+codex-meter import --full         # reconstruction : purge + reimport complet (aligne les
+                                  # event_uid sur le scan, purge les fichiers disparus)
 codex-meter import --reprice      # recalcule tous les coûts
 
 # Diagnostics et consistency check (base vs scan frais)
@@ -132,6 +133,8 @@ Par modèle
 2. Legacy : `event_msg` avec `payload.type == "token_count"` → `payload.info.last_token_usage` — **jamais** `total_token_usage`
 3. Sinon : diagnostic
 
+La règle vaut pour **toute la session** (table `primary_sessions`), pas seulement à l'intérieur d'un fichier : dès qu'une session porte un record moderne, ses événements legacy sont ignorés même s'ils sont ajoutés dans un autre fichier ou un segment incrémental ultérieur.
+
 ### Attribution modèle
 
 Table `turn_id → model` reconstruite depuis `turn_context`. Confiances : `exact` (turn trouvé), `inferred` (root unique, ou modèle du thread pour les records legacy via state DB), `unknown`. Un modèle inconnu reste compté en tokens, jamais tarifé.
@@ -193,9 +196,9 @@ React / TypeScript (ui/)
      SQLite (meter.sqlite) — hors de ~/.codex
 ```
 
-Tables principales : `inference_calls` (event_uid PK, response_id UNIQUE), `threads`, `thread_settings`, `source_files` (checkpoints `last_complete_offset` + `lines_total`), `pricing_rules`, `pricing_results`, `import_run`, `import_errors`.
+Tables principales : `inference_calls` (event_uid PK, response_id UNIQUE), `primary_sessions` (sessions déjà en format moderne), `threads`, `thread_settings`, `source_files` (checkpoints `last_complete_offset` + `lines_total` + `had_primary` + `pending_newline` + `enrichment_json`), `pricing_rules`, `pricing_results`, `import_run`, `import_errors`.
 
-Une dernière ligne JSON incomplète (écriture partielle) n'avance **jamais** le checkpoint : elle est relue à la passe suivante. Un record invalide échoue localement et le parsing continue.
+Une dernière ligne JSON incomplète (écriture partielle) n'avance **jamais** le checkpoint : elle est relue à la passe suivante. Une dernière ligne valide mais sans `\n` final est acceptée, et si ce `\n` arrive ensuite seul, il est consommé sans être compté (`pending_newline`) — sinon les ordinaux (et donc les `event_uid`) dériveraient du scan. Un record invalide échoue localement et le parsing continue. `session_meta` / `turn_context` déjà passés sont persistés dans `enrichment_json` : les segments suivants résolvent modèle et session comme un parse complet.
 
 ### Enrichissement state_5 (READ ONLY)
 
@@ -209,17 +212,21 @@ Une dernière ligne JSON incomplète (écriture partielle) n'avance **jamais** l
 ## Tests
 
 ```bash
-cargo test -q        # 33 tests : parser, dédup, checkpoints, pricing, tiers, store, export
+cargo test -q        # 44 tests : parser, dédup, checkpoints, segments incrémentaux,
+                     # phantom newline, bornes de période isolées, pricing, tiers,
+                     # store, reconstruction --full, export
 ```
 
-Fixtures couvrant : format moderne, legacy, dédup response_id, déplacement actif↔archivé, reprise après append, ligne partielle, record malformé, multi-modèles, cache write, long context (272 000 = court, 272 001 = long), sous-agents, Auto Review, modèle inconnu, service tier (fast, rétroactivité, fallback DB), idempotence des ré-imports, CSV parseable.
+Fixtures couvrant : format moderne, legacy, dédup response_id, déplacement actif↔archivé, reprise après append, ligne partielle, record malformé, multi-modèles, cache write, long context (272 000 = court, 272 001 = long), sous-agents, Auto Review, modèle inconnu, service tier (fast, rétroactivité, fallback DB), idempotence des ré-imports, CSV parseable, session mêlant moderne + legacy cross-fichiers, `\n` final arrivant après coup, `--from`/`--to` seuls, re-pricing conservant le tier fast, `--full` aligné sur le scan.
 
 ### Gate de non-régression
 
-Sur les données réelles du 11–18 septembre 2026, `codex-meter summary` doit retrouver :
+Sur les données réelles du 11–18 septembre 2026, `codex-meter summary` doit retrouver
+(référence mesurée le 2026-09-24) :
 
-- Input ≈ 0,89 Md · Output ≈ 3,0 M · Cache hit ≈ 96 % · Équivalent ≈ $860
+- Input = 898 872 208 (≈ 0,90 Md) · Output = 3 005 379 (≈ 3,0 M) · Cache hit ≈ 96 % · Équivalent ≈ $860
 - et **ne pas** afficher ≈ 49,8 B tokens (somme des compteurs cumulatifs).
+- `codex-meter doctor` après import : `Status: CONSISTENT`.
 
 ---
 
@@ -228,6 +235,7 @@ Sur les données réelles du 11–18 septembre 2026, `codex-meter summary` doit 
 - **Mesuré** : Codex Desktop / CLI / IDE, agents et sous-agents, Auto Review, voix.
 - **Non mesuré** : conversations ChatGPT (pas de source fiable locale).
 - Les appels legacy de l'ancien format peuvent rester sans modèle (coût `N/A`, tokens comptés) et sans tier.
+- Un rollout **supprimé** de `~/.codex/` laisse ses lignes en base : `codex-meter import --full` reconstruit proprement (purge + reimport).
 - Les tarifs sont des estimations issues de grilles publiques vérifiées à la date indiquée — à mettre à jour dans `pricing/` quand OpenAI publie de nouvelles grilles.
 
 ## Roadmap

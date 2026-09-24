@@ -73,7 +73,7 @@ function DailyChart({ byDay }: { byDay: SummaryDto["by_day"] }) {
               {fmtTokens(b.input)}
             </text>
             <text x={x + bw / 2} y={H - 6} textAnchor="middle" fontSize={11} fill="#8b93a7">
-              {b.name.slice(5)}
+              {b.name.length >= 10 ? b.name.slice(5) : b.name}
             </text>
           </g>
         );

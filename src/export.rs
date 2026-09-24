@@ -89,7 +89,7 @@ pub fn export_csv(
         .write_record([
             "event_uid", "response_id", "timestamp_utc", "day", "session_id", "thread_id",
             "thread_title", "turn_id", "root_turn_id", "model_slug", "model_confidence",
-            "activity", "parent_thread_id", "project_path", "input_tokens",
+            "service_tier", "activity", "parent_thread_id", "project_path", "input_tokens",
             "cached_input_tokens", "cache_write_input_tokens", "output_tokens",
             "reasoning_output_tokens", "total_tokens", "source_format", "source_file",
             "source_ordinal", "archived", "equivalent_cost_codex", "long_context",
@@ -111,6 +111,7 @@ pub fn export_csv(
                 c.root_turn_id.as_deref().unwrap_or(""),
                 c.model_slug.as_deref().unwrap_or(""),
                 &format!("{:?}", c.model_confidence).to_lowercase(),
+                c.service_tier.as_str(),
                 c.activity.as_deref().unwrap_or(""),
                 c.parent_thread_id.as_deref().unwrap_or(""),
                 c.project_path.as_deref().unwrap_or(""),

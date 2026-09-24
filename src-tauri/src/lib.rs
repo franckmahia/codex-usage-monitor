@@ -71,45 +71,57 @@ pub struct SummaryDto {
 }
 
 #[tauri::command]
-async fn get_summary(state: tauri::State<'_, AppState>, from: Option<String>, to: Option<String>) -> Result<SummaryDto, String> {
-    let engine = pricing::PricingEngine::embedded();
-    import::import(&state.codex_home, &state.db, &engine, false, false)?;
-    let calls = import::load_calls(&state.db, from.as_deref(), to.as_deref())?;
+async fn get_summary(
+    state: tauri::State<'_, AppState>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<SummaryDto, String> {
+    let home = state.codex_home.clone();
+    let db = state.db.clone();
+    // Import + lecture SQLite bloquants : hors du worker async (sinon un
+    // import long fige une cellule du runtime).
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = pricing::PricingEngine::embedded();
+        import::import(&home, &db, &engine, false, false)?;
+        let calls = import::load_calls(&db, from.as_deref(), to.as_deref())?;
 
-    let totals = aggregate::usage_of(&calls);
-    let mut total = aggregate::Bucket::default();
-    for c in &calls {
-        let cd = engine.cost_codex(c);
-        total.add(c, cd.model_known.then_some(&cd));
-    }
-    let by_day = aggregate::by_day(&calls, &engine);
-    let by_activity = aggregate::by_activity(&calls, &engine);
-    let anomalies =
-        aggregate::detect_anomalies(&calls, &by_day, &by_activity, total.long_context_calls);
+        let totals = aggregate::usage_of(&calls);
+        let mut total = aggregate::Bucket::default();
+        for c in &calls {
+            let cd = engine.cost_codex(c);
+            total.add(c, cd.model_known.then_some(&cd));
+        }
+        let by_day = aggregate::by_day(&calls, &engine);
+        let by_activity = aggregate::by_activity(&calls, &engine);
+        let anomalies =
+            aggregate::detect_anomalies(&calls, &by_day, &by_activity, total.long_context_calls);
 
-    Ok(SummaryDto {
-        from,
-        to,
-        calls: calls.len() as u64,
-        input: totals.input_tokens,
-        cached: totals.cached_input_tokens,
-        ordinary: totals.ordinary_input(),
-        cache_write: totals.cache_write_input_tokens,
-        output: totals.output_tokens,
-        reasoning: totals.reasoning_output_tokens,
-        cache_hit_percent: total.cache_hit_percent(),
-        equivalent_cost: total.equivalent_cost,
-        cost_without_cache: total.cost_without_cache,
-        cache_savings: total.cache_savings,
-        cache_savings_percent: total.cache_savings_percent(),
-        pricing_confidence_percent: pricing::pricing_confidence(&calls),
-        tiers: pricing::tier_stats(&calls),
-        by_day: to_dto(by_day),
-        by_model: to_dto(aggregate::by_model(&calls, &engine)),
-        by_project: to_dto(aggregate::by_project(&calls, &engine)),
-        by_activity: to_dto(by_activity),
-        anomalies,
+        Ok(SummaryDto {
+            from,
+            to,
+            calls: calls.len() as u64,
+            input: totals.input_tokens,
+            cached: totals.cached_input_tokens,
+            ordinary: totals.ordinary_input(),
+            cache_write: totals.cache_write_input_tokens,
+            output: totals.output_tokens,
+            reasoning: totals.reasoning_output_tokens,
+            cache_hit_percent: total.cache_hit_percent(),
+            equivalent_cost: total.equivalent_cost,
+            cost_without_cache: total.cost_without_cache,
+            cache_savings: total.cache_savings,
+            cache_savings_percent: total.cache_savings_percent(),
+            pricing_confidence_percent: pricing::pricing_confidence(&calls),
+            tiers: pricing::tier_stats(&calls),
+            by_day: to_dto(by_day),
+            by_model: to_dto(aggregate::by_model(&calls, &engine)),
+            by_project: to_dto(aggregate::by_project(&calls, &engine)),
+            by_activity: to_dto(by_activity),
+            anomalies,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -132,39 +144,48 @@ async fn get_threads(
     to: Option<String>,
     limit: Option<u32>,
 ) -> Result<Vec<ThreadRow>, String> {
-    let engine = pricing::PricingEngine::embedded();
-    let calls = import::load_calls(&state.db, from.as_deref(), to.as_deref())?;
-    let buckets = aggregate::by_thread(&calls, &engine);
-    let mut rows: Vec<ThreadRow> = buckets
-        .iter()
-        .map(|(id, b)| ThreadRow {
-            thread_id: id.clone(),
-            title: calls
-                .iter()
-                .find(|c| c.thread_id.as_deref() == Some(id.as_str()))
-                .and_then(|c| c.thread_title.clone())
-                .unwrap_or_default(),
-            project: calls
-                .iter()
-                .find(|c| c.thread_id.as_deref() == Some(id.as_str()))
-                .and_then(|c| c.project_path.clone())
-                .map(|p| aggregate::project_name(&p))
-                .unwrap_or_default(),
-            activity: calls
-                .iter()
-                .find(|c| c.thread_id.as_deref() == Some(id.as_str()))
-                .and_then(|c| c.activity.clone())
-                .unwrap_or_else(|| "unknown".into()),
-            calls: b.calls,
-            input: b.usage.input_tokens,
-            output: b.usage.output_tokens,
-            cache_hit_percent: b.cache_hit_percent(),
-            equivalent_cost: b.equivalent_cost,
-        })
-        .collect();
-    rows.sort_by(|a, b| b.input.cmp(&a.input));
-    rows.truncate(limit.unwrap_or(25) as usize);
-    Ok(rows)
+    let home = state.codex_home.clone();
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = pricing::PricingEngine::embedded();
+        // Import incremental aussi ici : un premier affichage de l'onglet
+        // Threads sans etre passe par le dashboard ne doit pas etre vide.
+        import::import(&home, &db, &engine, false, false)?;
+        let calls = import::load_calls(&db, from.as_deref(), to.as_deref())?;
+        let buckets = aggregate::by_thread(&calls, &engine);
+        let mut rows: Vec<ThreadRow> = buckets
+            .iter()
+            .map(|(id, b)| ThreadRow {
+                thread_id: id.clone(),
+                title: calls
+                    .iter()
+                    .find(|c| c.thread_id.as_deref() == Some(id.as_str()))
+                    .and_then(|c| c.thread_title.clone())
+                    .unwrap_or_default(),
+                project: calls
+                    .iter()
+                    .find(|c| c.thread_id.as_deref() == Some(id.as_str()))
+                    .and_then(|c| c.project_path.clone())
+                    .map(|p| aggregate::project_name(&p))
+                    .unwrap_or_default(),
+                activity: calls
+                    .iter()
+                    .find(|c| c.thread_id.as_deref() == Some(id.as_str()))
+                    .and_then(|c| c.activity.clone())
+                    .unwrap_or_else(|| "unknown".into()),
+                calls: b.calls,
+                input: b.usage.input_tokens,
+                output: b.usage.output_tokens,
+                cache_hit_percent: b.cache_hit_percent(),
+                equivalent_cost: b.equivalent_cost,
+            })
+            .collect();
+        rows.sort_by(|a, b| b.input.cmp(&a.input));
+        rows.truncate(limit.unwrap_or(25) as usize);
+        Ok(rows)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -192,43 +213,50 @@ pub struct DiagnosticsDto {
 
 #[tauri::command]
 async fn get_diagnostics(state: tauri::State<'_, AppState>) -> Result<DiagnosticsDto, String> {
-    let fresh = codex_meter::scan::scan(&state.codex_home);
-    let d = &fresh.diagnostics;
-    let conn = store::open_db(&state.db)?;
-    store::init_schema(&conn)?;
-    let (db_calls, db_totals) = store::db_totals(&conn)?;
-    let state_threads = codex_meter::state::thread_activity_counts(&state.codex_home.join("state_5.sqlite"))
-        .unwrap_or_default();
-    let state_tokens: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(state_tokens_used),0) FROM threads",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let engine = pricing::PricingEngine::embedded();
+    let home = state.codex_home.clone();
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let fresh = codex_meter::scan::scan(&home);
+        let d = &fresh.diagnostics;
+        let conn = store::open_db(&db)?;
+        store::init_schema(&conn)?;
+        let (db_calls, db_totals) = store::db_totals(&conn)?;
+        let state_threads =
+            codex_meter::state::thread_activity_counts(&home.join("state_5.sqlite"))
+                .unwrap_or_default();
+        let state_tokens: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(state_tokens_used),0) FROM threads",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let engine = pricing::PricingEngine::embedded();
 
-    Ok(DiagnosticsDto {
-        codex_home: state.codex_home.display().to_string(),
-        db_path: state.db.display().to_string(),
-        files_found: d.files_found,
-        files_parsed: d.files_parsed,
-        lines_total: d.lines_total,
-        usage_records: d.usage_records,
-        duplicates_ignored: d.duplicates_ignored,
-        legacy_records: d.legacy_records,
-        parse_errors: d.parse_errors.iter().take(10).cloned().collect(),
-        subset_violations: d.subset_violations,
-        db_calls,
-        db_input: db_totals.input_tokens,
-        db_output: db_totals.output_tokens,
-        consistent: db_totals == fresh.totals,
-        state_lifetime_tokens_used: state_tokens as u64,
-        state_threads_by_activity: state_threads.into_iter().collect(),
-        pricing_codex_version: engine.codex.version.clone(),
-        pricing_api_version: engine.api.version.clone(),
-        pricing_last_verified: engine.codex.last_verified.clone(),
+        Ok(DiagnosticsDto {
+            codex_home: home.display().to_string(),
+            db_path: db.display().to_string(),
+            files_found: d.files_found,
+            files_parsed: d.files_parsed,
+            lines_total: d.lines_total,
+            usage_records: d.usage_records,
+            duplicates_ignored: d.duplicates_ignored,
+            legacy_records: d.legacy_records,
+            parse_errors: d.parse_errors.iter().take(10).cloned().collect(),
+            subset_violations: d.subset_violations,
+            db_calls,
+            db_input: db_totals.input_tokens,
+            db_output: db_totals.output_tokens,
+            consistent: db_totals == fresh.totals,
+            state_lifetime_tokens_used: state_tokens.max(0) as u64,
+            state_threads_by_activity: state_threads.into_iter().collect(),
+            pricing_codex_version: engine.codex.version.clone(),
+            pricing_api_version: engine.api.version.clone(),
+            pricing_last_verified: engine.codex.last_verified.clone(),
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -244,17 +272,23 @@ pub struct ImportReportDto {
 
 #[tauri::command]
 async fn refresh_import(state: tauri::State<'_, AppState>) -> Result<ImportReportDto, String> {
-    let engine = pricing::PricingEngine::embedded();
-    let rep = import::import(&state.codex_home, &state.db, &engine, false, false)?;
-    Ok(ImportReportDto {
-        files_seen: rep.files_seen,
-        files_skipped: rep.files_skipped,
-        files_changed: rep.files_changed,
-        calls_inserted: rep.calls_inserted,
-        duplicates_ignored: rep.duplicates_ignored,
-        parse_errors: rep.parse_errors,
-        duration_ms: rep.duration_ms,
+    let home = state.codex_home.clone();
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = pricing::PricingEngine::embedded();
+        let rep = import::import(&home, &db, &engine, false, false)?;
+        Ok(ImportReportDto {
+            files_seen: rep.files_seen,
+            files_skipped: rep.files_skipped,
+            files_changed: rep.files_changed,
+            calls_inserted: rep.calls_inserted,
+            duplicates_ignored: rep.duplicates_ignored,
+            parse_errors: rep.parse_errors,
+            duration_ms: rep.duration_ms,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -264,10 +298,15 @@ async fn export_csv_files(
     from: Option<String>,
     to: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let engine = pricing::PricingEngine::embedded();
-    let calls = import::load_calls(&state.db, from.as_deref(), to.as_deref())?;
-    let files = export::export_csv(std::path::Path::new(&dir), &calls, &engine)?;
-    Ok(files.iter().map(|p| p.display().to_string()).collect())
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = pricing::PricingEngine::embedded();
+        let calls = import::load_calls(&db, from.as_deref(), to.as_deref())?;
+        let files = export::export_csv(std::path::Path::new(&dir), &calls, &engine)?;
+        Ok(files.iter().map(|p| p.display().to_string()).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]

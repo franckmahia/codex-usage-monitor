@@ -147,12 +147,32 @@ impl InferenceCall {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionMeta {
+    #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
     pub originator: Option<String>,
+    #[serde(default)]
     pub cli_version: Option<String>,
+}
+
+/// Etat d'enrichissement d'un fichier au-dela du segment courant : un
+/// import incremental ne revoit jamais les lignes deja passees
+/// (session_meta, turn_context), on les persiste dans le checkpoint pour
+/// que les segments suivants resolvent modele/session comme un parse complet.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct FileEnrichment {
+    #[serde(default)]
+    pub meta: SessionMeta,
+    #[serde(default)]
+    pub turn_models: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub root_models: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub turn_cwd: std::collections::HashMap<String, String>,
 }
 
 /// Evenement d'usage brut, avant resolution du modele.
@@ -177,7 +197,6 @@ pub struct FileCounters {
     pub legacy_token_count_events: u64,
     pub legacy_null_info: u64,
     pub legacy_total_usage_present: u64,
-    pub duplicates_ignored: u64,
     pub subset_violations: u64,
     pub records_without_response_id: u64,
 }

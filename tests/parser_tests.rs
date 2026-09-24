@@ -344,3 +344,35 @@ fn cumulative_counters_never_leak_into_totals() {
     assert_eq!(out.totals.input_tokens, 30_000);
     let _ = fs::remove_dir_all(&home);
 }
+
+#[test]
+fn same_session_never_mixes_primary_and_legacy_across_files() {
+    // Deux fichiers distincts, MEME session : l'event legacy de l'ancienne
+    // methode ne doit jamais s'ajouter aux token_usage_record (invariant 7,
+    // applicable globalement et pas seulement a l interieur d un fichier).
+    let home = temp_home(
+        "globalmix",
+        &[("2026/09/15", "current_token_usage_record.jsonl")],
+    );
+    let legacy = fixture("legacy_token_count.jsonl").replace("sess-legacy", "sess-primary");
+    let d = home.join("sessions/2026/09/03");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("rollout-legacy-same-session.jsonl"), legacy).unwrap();
+
+    let out = totals(&home);
+    assert_eq!(
+        out.calls.len(),
+        2,
+        "seuls les 2 appels primaires de sess-primary doivent compter"
+    );
+    assert!(out
+        .calls
+        .iter()
+        .all(|c| c.source_format == SourceFormat::TokenUsageRecord));
+    assert_eq!(out.totals.input_tokens, 30_000, "jamais 30_000 + legacy");
+    assert_eq!(
+        out.diagnostics.legacy_records, 0,
+        "fichier legacy couvert en moderne : plus une source"
+    );
+    let _ = fs::remove_dir_all(&home);
+}

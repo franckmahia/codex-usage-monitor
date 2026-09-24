@@ -19,9 +19,17 @@ pub fn open_db(path: &Path) -> Result<Connection, String> {
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
     let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    // UI + watch + CLI peuvent ouvrir la base en parallele : attendre le
+    // verrou au lieu d'echouer « database is locked » au hasard.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
     conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| e.to_string())?;
+    // FK actives : purge des legacy (voir clear_legacy_for_session) doit
+    // supprimer aussi leurs pricing_results via ON DELETE CASCADE.
+    conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|e| e.to_string())?;
     Ok(conn)
 }
@@ -41,6 +49,9 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
             mtime_unix INTEGER,
             last_complete_offset INTEGER NOT NULL DEFAULT 0,
             lines_total INTEGER NOT NULL DEFAULT 0,
+            had_primary INTEGER NOT NULL DEFAULT 0,
+            pending_newline INTEGER NOT NULL DEFAULT 0,
+            enrichment_json TEXT,
             last_imported_at TEXT NOT NULL
         );
 
@@ -81,6 +92,11 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
             thread_id TEXT PRIMARY KEY,
             service_tier TEXT NOT NULL,
             applied_ts TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS primary_sessions (
+            session_id TEXT PRIMARY KEY,
+            marked_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS threads (
@@ -158,6 +174,36 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE inference_calls ADD COLUMN service_tier TEXT NOT NULL DEFAULT 'unknown'", [])
             .map_err(|e| format!("migration service_tier: {e}"))?;
     }
+    // Migration des colonnes de continuite des checkpoints (bases Phase 2/3).
+    for (table, col, ddl) in [
+        (
+            "source_files",
+            "had_primary",
+            "ALTER TABLE source_files ADD COLUMN had_primary INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "source_files",
+            "pending_newline",
+            "ALTER TABLE source_files ADD COLUMN pending_newline INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "source_files",
+            "enrichment_json",
+            "ALTER TABLE source_files ADD COLUMN enrichment_json TEXT",
+        ),
+    ] {
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, col],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(true);
+        if !has_col {
+            conn.execute(ddl, []).map_err(|e| format!("migration {table}.{col}: {e}"))?;
+        }
+    }
 
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
@@ -174,11 +220,15 @@ pub struct Checkpoint {
     pub mtime_unix: Option<i64>,
     pub last_complete_offset: u64,
     pub lines_total: u64,
+    pub had_primary: bool,
+    pub pending_newline: bool,
+    pub enrichment_json: Option<String>,
 }
 
 pub fn get_checkpoint(conn: &Connection, rel_path: &str) -> Option<Checkpoint> {
     conn.query_row(
-        "SELECT size, mtime_unix, last_complete_offset, lines_total
+        "SELECT size, mtime_unix, last_complete_offset, lines_total,
+                had_primary, pending_newline, enrichment_json
          FROM source_files WHERE path = ?1",
         params![rel_path],
         |row| {
@@ -187,6 +237,9 @@ pub fn get_checkpoint(conn: &Connection, rel_path: &str) -> Option<Checkpoint> {
                 mtime_unix: row.get(1)?,
                 last_complete_offset: row.get::<_, i64>(2)? as u64,
                 lines_total: row.get::<_, i64>(3)? as u64,
+                had_primary: row.get::<_, i64>(4)? != 0,
+                pending_newline: row.get::<_, i64>(5)? != 0,
+                enrichment_json: row.get(6)?,
             })
         },
     )
@@ -201,16 +254,24 @@ pub fn save_checkpoint(
     mtime_unix: Option<i64>,
     last_complete_offset: u64,
     lines_total: u64,
+    had_primary: bool,
+    pending_newline: bool,
+    enrichment_json: &str,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO source_files(path, archived, size, mtime_unix, last_complete_offset, lines_total, last_imported_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO source_files(path, archived, size, mtime_unix, last_complete_offset,
+                                  lines_total, had_primary, pending_newline, enrichment_json,
+                                  last_imported_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(path) DO UPDATE SET
             archived = excluded.archived,
             size = excluded.size,
             mtime_unix = excluded.mtime_unix,
             last_complete_offset = excluded.last_complete_offset,
             lines_total = excluded.lines_total,
+            had_primary = excluded.had_primary,
+            pending_newline = excluded.pending_newline,
+            enrichment_json = excluded.enrichment_json,
             last_imported_at = excluded.last_imported_at",
         params![
             rel_path,
@@ -219,6 +280,9 @@ pub fn save_checkpoint(
             mtime_unix,
             last_complete_offset as i64,
             lines_total as i64,
+            had_primary as i64,
+            pending_newline as i64,
+            enrichment_json,
             crate::util::iso_utc(crate::util::now_unix())
         ],
     )
@@ -317,6 +381,80 @@ pub fn upsert_thread_settings(
     Ok(())
 }
 
+/// Marque une session comme couverte par le format moderne : a partir de
+/// la, les events legacy de cette session ne sont JAMAIS comptes (invariant
+/// 7 : jamais melanger les deux methodes pour une meme session).
+pub fn mark_primary_session(conn: &Connection, session_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO primary_sessions(session_id, marked_at) VALUES(?1, ?2)",
+        params![session_id, crate::util::iso_utc(crate::util::now_unix())],
+    )
+    .map_err(|e| format!("mark primary session: {e}"))?;
+    Ok(())
+}
+
+pub fn is_primary_session(conn: &Connection, session_id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM primary_sessions WHERE session_id = ?1",
+        params![session_id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Supprime les appels legacy deja inseres pour une session qui vient d'etre
+/// couverte par le format moderne. Retourne le nombre de lignes purgees
+/// (leurs pricing_results partent en CASCADE).
+pub fn clear_legacy_for_session(conn: &Connection, session_id: &str) -> Result<u64, String> {
+    let n = conn
+        .execute(
+            "DELETE FROM inference_calls
+             WHERE source_format = 'legacy_token_count' AND session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| format!("clear legacy {session_id}: {e}"))?;
+    Ok(n as u64)
+}
+
+/// Rattrapage idempotent : indexe comme primaire les sessions deja en base
+/// au format moderne (fichiers incrementaux sautes depuis l'ajout de
+/// primary_sessions), purge leurs lignes residuelles — y compris les events
+/// legacy `session_id NULL` ajoutes par un segment incremental sans
+/// session_meta dans les fichiers qui portent du primary — pour que la
+/// base rejoigne la regle globale du scan sans exiger `import --full`.
+pub fn backfill_primary_sessions(conn: &Connection) -> Result<u64, String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO primary_sessions(session_id, marked_at)
+         SELECT DISTINCT session_id, ?1 FROM inference_calls
+         WHERE source_format = 'token_usage_record'
+           AND session_id IS NOT NULL AND session_id != ''",
+        params![crate::util::iso_utc(crate::util::now_unix())],
+    )
+    .map_err(|e| format!("backfill primary sessions: {e}"))?;
+    conn.execute(
+        "UPDATE source_files SET had_primary = 1
+         WHERE had_primary = 0
+           AND path IN (
+             SELECT DISTINCT source_file FROM inference_calls
+             WHERE source_format = 'token_usage_record'
+               AND source_file IS NOT NULL AND source_file != ''
+           )",
+        [],
+    )
+    .map_err(|e| format!("backfill had_primary: {e}"))?;
+    conn.execute(
+        "DELETE FROM inference_calls
+         WHERE source_format = 'legacy_token_count'
+           AND (session_id IN (SELECT session_id FROM primary_sessions)
+                OR source_file IN (
+                  SELECT path FROM source_files WHERE had_primary = 1
+                ))",
+        [],
+    )
+    .map_err(|e| format!("backfill prune legacy: {e}"))
+    .map(|n| n as u64)
+}
+
 /// Dernier tier connu en base pour un thread (fallback inter-fichiers).
 pub fn get_thread_tier(conn: &Connection, thread_id: &str) -> Option<(String, String)> {
     conn.query_row(
@@ -391,13 +529,13 @@ pub fn reprice_all(conn: &Connection, engine: &PricingEngine) -> Result<u64, Str
         .map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT event_uid, model_slug, day, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, output_tokens, reasoning_output_tokens,
-                    total_tokens, model_confidence
+            "SELECT event_uid, model_slug, day, service_tier, input_tokens,
+                    cached_input_tokens, cache_write_input_tokens, output_tokens,
+                    reasoning_output_tokens, total_tokens, model_confidence
              FROM inference_calls",
         )
         .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, Option<String>, String, i64, i64, i64, i64, i64, i64, String)> = stmt
+    let rows: Vec<(String, Option<String>, String, String, i64, i64, i64, i64, i64, i64, String)> = stmt
         .query_map([], |row| {
             Ok((
                 row.get(0)?,
@@ -410,14 +548,17 @@ pub fn reprice_all(conn: &Connection, engine: &PricingEngine) -> Result<u64, Str
                 row.get(7)?,
                 row.get(8)?,
                 row.get(9)?,
+                row.get(10)?,
             ))
         })
         .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
 
     let mut priced = 0u64;
-    for (event_uid, model_slug, day, input, cached, cache_write, output, reasoning, total, conf) in rows {
+    for (event_uid, model_slug, day, tier, input, cached, cache_write, output, reasoning, total, conf) in
+        rows
+    {
         let call = InferenceCall {
             event_uid: event_uid.clone(),
             response_id: None,
@@ -428,7 +569,7 @@ pub fn reprice_all(conn: &Connection, engine: &PricingEngine) -> Result<u64, Str
             root_turn_id: None,
             model_slug,
             model_confidence: parse_confidence(&conf),
-            service_tier: crate::model::ServiceTier::Unknown,
+            service_tier: crate::model::ServiceTier::parse(&tier),
             project_path: None,
             activity: None,
             parent_thread_id: None,
@@ -484,11 +625,17 @@ pub fn load_calls(
                 source_format, source_file, source_ordinal, archived
          FROM inference_calls WHERE 1=1",
     );
-    if from.is_some() {
-        sql.push_str(" AND day >= ?1");
+    // Params positionnels construits dans l'ordre d'apparition : passer
+    // ?1/?2 discrets exigeait les deux bornes meme quand une seule est
+    // fournie (bug « Got 2, needed 1 » sur --from seul).
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(f) = from {
+        sql.push_str(" AND day >= ?");
+        args.push(f);
     }
-    if to.is_some() {
-        sql.push_str(" AND day <= ?2");
+    if let Some(t) = to {
+        sql.push_str(" AND day <= ?");
+        args.push(t);
     }
     sql.push_str(" ORDER BY timestamp_utc, source_file, source_ordinal");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -522,28 +669,11 @@ pub fn load_calls(
             archived: row.get::<_, i64>(24)? != 0,
         })
     };
-    let rows = match (from, to) {
-        (Some(f), Some(t)) => stmt
-            .query_map(params![f, t], map_row)
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>(),
-        (Some(f), None) => stmt
-            .query_map(params![f, ""], map_row)
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>(),
-        (None, Some(t)) => stmt
-            .query_map(params!["", t], map_row)
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>(),
-        (None, None) => stmt
-            .query_map([], map_row)
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>(),
-    };
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(args.iter()), map_row)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
     Ok(rows)
 }
 

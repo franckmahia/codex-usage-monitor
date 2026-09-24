@@ -114,9 +114,11 @@ fn fmt_tokens(n: u64) -> String {
 fn fmt_money(v: f64) -> String {
     let sign = if v < 0.0 { "-" } else { "" };
     let v = v.abs();
-    let whole = v as u64;
-    let cents = ((v - whole as f64) * 100.0).round() as u64;
-    let cents = if cents > 99 { 99 } else { cents };
+    // Arrondi au centime le plus proche avec report vers les dollars
+    // (1.995 -> $2.00, pas $1.99 par ecratement de 100).
+    let cents_total = (v * 100.0).round() as u64;
+    let whole = cents_total / 100;
+    let cents = cents_total % 100;
     format!("{sign}${}.{:02}", fmt_int(whole), cents)
 }
 
@@ -248,6 +250,8 @@ fn render_import_report(rep: &import::ImportReport, cli: &Cli) {
                 "parse_errors": rep.parse_errors,
                 "threads_enriched": rep.threads_enriched,
                 "calls_enriched": rep.calls_enriched,
+                "tiers_repaired": rep.tiers_repaired,
+                "legacy_pruned": rep.legacy_pruned,
                 "repriced": rep.repriced,
                 "priced_calls": rep.priced_calls,
                 "duration_ms": rep.duration_ms,
@@ -262,8 +266,21 @@ fn render_import_report(rep: &import::ImportReport, cli: &Cli) {
     println!("  Octets lus         {}", fmt_int(rep.bytes_read));
     println!("  Appels insérés     {}", fmt_int(rep.calls_inserted));
     println!("  Doublons ignores   {}", fmt_int(rep.duplicates_ignored));
+    if rep.legacy_pruned > 0 {
+        println!(
+            "  Legacy purges      {} (session deja couverte en moderne)",
+            fmt_int(rep.legacy_pruned)
+        );
+    }
     println!("  Erreurs parsing    {}", rep.parse_errors);
-    println!("  Threads enrichis   {} ({} calls touches)", rep.threads_enriched, fmt_int(rep.calls_enriched));
+    println!(
+        "  Threads enrichis   {} ({} calls touches)",
+        rep.threads_enriched,
+        fmt_int(rep.calls_enriched)
+    );
+    if rep.tiers_repaired > 0 {
+        println!("  Tiers repares      {}", fmt_int(rep.tiers_repaired));
+    }
     if rep.repriced {
         println!("  Re-pricing         {} appels valorises", rep.priced_calls);
     }
@@ -522,6 +539,19 @@ fn render_summary(
 }
 
 fn render_doctor(home: &std::path::Path, db_path: &std::path::Path, engine: &PricingEngine, cli: &Cli) {
+    // Import incremental d'abord : une divergence APRES import est une vraie
+    // incoherence ; avant, ce n'est qu'un fichier plus recent que la base.
+    match import::import(home, db_path, engine, false, false) {
+        Ok(rep) => {
+            if rep.calls_inserted > 0 && !cli.json {
+                eprintln!(
+                    "[import] +{} appels avant le diagnostic",
+                    rep.calls_inserted
+                );
+            }
+        }
+        Err(e) => eprintln!("warning: import prealable echoue : {e}"),
+    }
     let fresh = scan::scan(home);
     let d = &fresh.diagnostics;
 
@@ -616,7 +646,10 @@ fn render_doctor(home: &std::path::Path, db_path: &std::path::Path, engine: &Pri
     } else {
         "DIVERGENCE — relancer `import --full`"
     };
-    println!("  state DB lifetime     {} tokens_used (indication UNIQUEMENT, jamais source de totaux)", fmt_int(state_tokens_used as u64));
+    println!(
+        "  state DB lifetime     {} tokens_used (indication UNIQUEMENT, jamais source de totaux)",
+        fmt_int(state_tokens_used.max(0) as u64)
+    );
     println!("  Status: {status}");
     println!();
     println!("Threads state db (enrichissement)");

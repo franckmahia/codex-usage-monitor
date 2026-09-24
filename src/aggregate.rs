@@ -112,8 +112,9 @@ pub fn project_name(path: &str) -> String {
 
 /// Séparation par type d'activité sans double comptage : priorité à
 /// l'enrichissement state db (main / subagent / auto_review / voice / other),
-/// sinon heuristique sur le modèle (codex-auto-review). Les appels hors
-/// threads connus restent "unknown" afin de ne jamais inventer.
+/// sinon heuristique sur le modèle (codex-auto-review). Les appels sans
+/// enrichissement ni modèle restent "unknown_model" ; un modèle connu sans
+/// enrichissement rejoint "other" (jamais invente "main").
 pub fn by_activity(calls: &[InferenceCall], engine: &PricingEngine) -> Buckets {
     let mut out = Buckets::new();
     for c in calls {
@@ -121,7 +122,7 @@ pub fn by_activity(calls: &[InferenceCall], engine: &PricingEngine) -> Buckets {
             Some(a) => a.to_string(),
             None => match c.model_slug.as_deref() {
                 Some("codex-auto-review") => "auto_review".to_string(),
-                Some(_) => "ordinary".to_string(),
+                Some(_) => "other".to_string(),
                 None => "unknown_model".to_string(),
             },
         };
@@ -197,12 +198,12 @@ pub fn detect_anomalies(
         }
     }
 
-    if let (Some(first), Some(last)) = (by_day.values().next(), by_day.values().last()) {
+    if !by_day.is_empty() {
         let avg = by_day
             .values()
             .map(|b| b.usage.input_tokens)
             .sum::<u64>() as f64
-            / by_day.len().max(1) as f64;
+            / by_day.len() as f64;
         for (day, b) in by_day {
             if avg > 0.0 && b.usage.input_tokens as f64 > avg * 2.0 {
                 anomalies.push(format!(
@@ -211,7 +212,6 @@ pub fn detect_anomalies(
                 ));
             }
         }
-        let _ = (first, last);
     }
 
     anomalies

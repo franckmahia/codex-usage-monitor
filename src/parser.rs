@@ -8,9 +8,6 @@ use crate::model::{
     FileParseResult, RawUsageEvent, SessionMeta, SourceFormat, TokenUsage,
 };
 
-/// Longueur maximale sauvegardee pour un message d'erreur de ligne.
-const MAX_ERR: usize = 240;
-
 #[derive(serde::Deserialize)]
 struct RolloutLine {
     #[serde(default)]
@@ -74,14 +71,28 @@ struct LegacyInfo {
 /// lignes traitees (cumul de lines_before). Une derniere ligne sans \n
 /// et JSON invalide (ecriture partielle) est ignoree et le checkpoint
 /// n'avance pas : elle sera relue a la prochaine passe.
-pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> ParsedFile {
+///
+/// `resume_pending_newline` : vrai si le checkpoint precedent s'arretait sur
+/// une ligne valide SANS \n (fichier sans newline final). Si le fichier
+/// vient ensuite de recevoir ce \n seul, il faut le consommer SANS le
+/// compter comme nouvelle ligne : c'est le terminator d'une ligne deja
+/// comptee, sinon tous les ordinaux (et donc les event_uid) derivent du
+/// scan d'une ligne.
+pub fn parse_file_from(
+    path: &Path,
+    start_offset: u64,
+    lines_before: u64,
+    resume_pending_newline: bool,
+) -> ParsedFile {
     let mut out = ParsedFile {
         result: FileParseResult::default(),
         end_offset: start_offset,
-        lines_processed: 0,
+        pending_newline: resume_pending_newline,
     };
     let mut result = FileParseResult::default();
     let mut meta_seen = false;
+    let mut skip_terminator = resume_pending_newline;
+    let mut pending_newline = resume_pending_newline;
 
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -122,6 +133,19 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
         let line_str = String::from_utf8_lossy(&buf);
         let line = line_str.trim_end_matches(['\n', '\r']);
 
+        // Terminator de la derniere ligne du checkpoint precedent (elle
+        // avait ete acceptee sans \n, le \n est arrive depuis) : consomme,
+        // mais jamais compte — elle est deja dans lines_before.
+        if skip_terminator {
+            skip_terminator = false;
+            if complete && line.is_empty() {
+                offset += n as u64;
+                pending_newline = false;
+                out.end_offset = offset;
+                continue;
+            }
+        }
+
         // Ligne finale incomplete (JSON non termine) : on ne la traite pas
         // et on n'avance pas le checkpoint.
         if !complete {
@@ -132,6 +156,7 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
         }
 
         result.counters.lines_total += 1;
+        pending_newline = !complete;
         let ordinal = lines_before + index;
         index += 1;
         offset += n as u64;
@@ -145,7 +170,6 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
             || line.contains("\"session_meta\""))
         {
             out.end_offset = offset;
-            out.lines_processed += 1;
             continue;
         }
 
@@ -157,7 +181,6 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
                     .errors
                     .push(format!("line {ordinal}: JSON error: {e}"));
                 out.end_offset = offset;
-                out.lines_processed += 1;
                 continue;
             }
         };
@@ -256,7 +279,6 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
                         ));
                     }
                     out.end_offset = offset;
-                    out.lines_processed += 1;
                     continue;
                 }
 
@@ -269,7 +291,6 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
                     .unwrap_or(false);
                 if !is_token_count {
                     out.end_offset = offset;
-                    out.lines_processed += 1;
                     continue;
                 }
                 result.counters.legacy_token_count_events += 1;
@@ -277,7 +298,6 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
                 if info.is_none() || info == Some(&Value::Null) {
                     result.counters.legacy_null_info += 1;
                     out.end_offset = offset;
-                    out.lines_processed += 1;
                     continue;
                 }
                 match serde_json::from_value::<LegacyInfo>(info.unwrap().clone()) {
@@ -318,9 +338,9 @@ pub fn parse_file_from(path: &Path, start_offset: u64, lines_before: u64) -> Par
             }
         }
         out.end_offset = offset;
-        out.lines_processed += 1;
     }
     out.result = result;
+    out.pending_newline = pending_newline;
     out
 }
 
@@ -330,12 +350,13 @@ pub struct ParsedFile {
     pub result: FileParseResult,
     /// Offset apres la derniere ligne complete traitee.
     pub end_offset: u64,
-    pub lines_processed: u64,
+    /// La derniere ligne acceptee manque de \n (voir parse_file_from).
+    pub pending_newline: bool,
 }
 
 /// Parse complet depuis le debut (scan en memoire).
 pub fn parse_file(path: &Path) -> FileParseResult {
-    parse_file_from(path, 0, 0).result
+    parse_file_from(path, 0, 0, false).result
 }
 
 /// Resolve le service tier d'un evenement : dernier settings du thread
@@ -412,14 +433,6 @@ pub fn event_uid(event: &RawUsageEvent) -> String {
     hasher.update(event.usage.output_tokens.to_le_bytes());
     hasher.update(event.source_ordinal.to_le_bytes());
     format!("{:x}", hasher.finalize())
-}
-
-pub fn truncate_err(s: &str) -> String {
-    if s.len() > MAX_ERR {
-        format!("{}…", &s[..MAX_ERR])
-    } else {
-        s.to_string()
-    }
 }
 
 /// Construit un appel finalise : modele resolu (exact/inferred/unknown),
